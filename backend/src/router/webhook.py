@@ -125,8 +125,13 @@ def build_meeting_markdown(t: dict) -> tuple[str, str, str]:
     participants = t.get("participants") or [
         a.get("email") or a.get("displayName") for a in (t.get("meeting_attendees") or [])
     ]
+    # Fireflies returns duration in MINUTES (not seconds).
     duration = t.get("duration")
-    duration_str = f"{round(duration / 60)} min" if isinstance(duration, (int, float)) else "N/A"
+    if isinstance(duration, (int, float)) and duration > 0:
+        m = round(duration)
+        duration_str = f"{m // 60}h {m % 60}m" if m >= 60 else f"{m} min"
+    else:
+        duration_str = "N/A"
 
     summary = t.get("summary") or {}
     overview = (summary.get("overview") or "").strip()

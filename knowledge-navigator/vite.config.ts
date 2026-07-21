@@ -12,4 +12,10 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  // Build the SSR server with Nitro's Vercel preset so `vite build` emits Vercel
+  // Build Output API artifacts (.vercel/output). Overrides the wrapper's default
+  // Cloudflare target. Override at build time with NITRO_PRESET if deploying elsewhere.
+  nitro: {
+    preset: process.env.NITRO_PRESET || "vercel",
+  },
 });

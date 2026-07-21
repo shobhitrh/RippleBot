@@ -50,6 +50,10 @@ knowledge-navigator/dist/
 knowledge-navigator/.tanstack/
 knowledge-navigator/.output/
 knowledge-navigator/.wrangler/
+knowledge-navigator/.vercel/
+knowledge-navigator/.nitro/
+.vercel/
+.nitro/
 .vite/
 npm-debug.log*
 yarn-debug.log*

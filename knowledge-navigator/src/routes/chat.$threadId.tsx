@@ -135,6 +135,7 @@ function ChatThreadView() {
   // ── Send / streaming ─────────────────────────────────
   const send = async (text: string) => {
     if (!text.trim() || !thread) return;
+    stopListening(); // auto-stop the mic once the question is sent
     const currentThreadId = thread.id;
 
     const userMsg: ChatMessage = {
@@ -264,12 +265,18 @@ function ChatThreadView() {
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<any>(null);
 
+  const stopListening = () => {
+    try {
+      recognitionRef.current?.stop();
+    } catch {
+      /* already stopped */
+    }
+    setIsListening(false);
+  };
+
   const toggleListening = () => {
     if (isListening) {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-      }
-      setIsListening(false);
+      stopListening();
       return;
     }
 

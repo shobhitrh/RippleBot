@@ -4,7 +4,6 @@ import { apiFetch, useBackoffPoll } from "@/lib/api";
 import { CompanySelector } from "@/components/company-selector";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
-import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   CommandDialog,
@@ -91,9 +90,6 @@ export function AppHeader() {
         <CompanySelector />
         <StatusPill label="API" status={backendStatus} text={backendStatus === "active" ? "Online" : backendStatus === "error" ? "Offline" : "..."} />
         <StatusPill label="Vector DB" status={vectorStatus} text={vectorStatus === "active" ? "Active" : vectorStatus === "error" ? "Error" : "..."} />
-        <Button variant="ghost" size="sm" className="hidden sm:inline-flex" onClick={() => navigate({ to: "/settings" })}>
-          Settings
-        </Button>
         <Avatar className="h-7 w-7 sm:h-8 sm:w-8 shrink-0">
           <AvatarFallback className="bg-accent text-accent-foreground text-[10px] sm:text-xs font-semibold">
             AC

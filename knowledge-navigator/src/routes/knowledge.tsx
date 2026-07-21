@@ -38,7 +38,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { type KnowledgeFile } from "@/lib/mock-data";
-import { apiFetch, apiUrl, useBackoffPoll } from "@/lib/api";
+import { apiFetch, useBackoffPoll } from "@/lib/api";
 
 export const Route = createFileRoute("/knowledge")({
   component: KnowledgePage,
@@ -125,14 +125,31 @@ function KnowledgePage() {
     }
   };
 
-  const downloadFile = (filename: string) => {
-    const link = document.createElement("a");
-    link.href = apiUrl(`/api/documents/${encodeURIComponent(filename)}/download`);
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    toast.success(`Downloading ${filename}...`);
+  const downloadFile = async (filename: string) => {
+    // Fetch as a blob via apiFetch so the X-Company-Id header is sent (a plain
+    // <a href> can't send headers → backend hits the wrong tenant → 404).
+    // Works for any file format.
+    try {
+      const res = await apiFetch(`/api/documents/${encodeURIComponent(filename)}/download`, {
+        timeoutMs: 60000,
+      });
+      if (!res.ok) {
+        toast.error("File not found");
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`Downloading ${filename}...`);
+    } catch {
+      toast.error("Download failed — is the backend reachable?");
+    }
   };
 
   const reindex = async (id: string) => {

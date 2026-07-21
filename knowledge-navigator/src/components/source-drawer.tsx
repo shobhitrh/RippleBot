@@ -7,7 +7,32 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { FileText, Download } from "lucide-react";
-import { apiFetch, apiUrl } from "@/lib/api";
+import { toast } from "sonner";
+import { apiFetch } from "@/lib/api";
+
+async function downloadOriginal(filename: string) {
+  // Blob download so the X-Company-Id header is sent (works for any format).
+  try {
+    const res = await apiFetch(`/api/documents/${encodeURIComponent(filename)}/download`, {
+      timeoutMs: 60000,
+    });
+    if (!res.ok) {
+      toast.error("File not found");
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch {
+    toast.error("Download failed — is the backend reachable?");
+  }
+}
 
 function renderParsedContent(text: string) {
   if (!text) return null;
@@ -171,14 +196,14 @@ export function SourceDrawer({
               <span className="truncate">{file ?? "Source"}</span>
             </span>
             {file && (
-              <a
-                href={apiUrl(`/api/documents/${encodeURIComponent(file)}/download`)}
-                download
+              <button
+                type="button"
+                onClick={() => downloadOriginal(file)}
                 className="inline-flex items-center gap-1.5 text-xs font-normal text-indigo-500 hover:text-indigo-600 transition-colors border border-indigo-200 rounded-md px-2.5 py-1 bg-indigo-50/50 hover:bg-indigo-50 shrink-0 self-start sm:self-auto"
               >
                 <Download className="h-3.5 w-3.5" />
                 Download Original
-              </a>
+              </button>
             )}
           </SheetTitle>
           <SheetDescription className="text-xs sm:text-sm">

@@ -288,43 +288,71 @@ def _should_process(event_type: Optional[str]) -> bool:
     return "transcri" in e or "summ" in e
 
 
+async def _parse_event(request: Request) -> tuple:
+    """
+    Leniently extract (meeting_id, event_type) from whatever JSON Fireflies sends.
+    Fireflies' test pings and real events vary in shape, and a strict schema causes
+    422s — so we accept any body and probe common keys / nesting.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    # meeting/transcript id under several possible keys, incl. nested data/meeting
+    nested = {}
+    for k in ("data", "meeting", "transcript", "payload"):
+        v = body.get(k)
+        if isinstance(v, dict):
+            nested.update(v)
+    src = {**nested, **body}
+    meeting_id = (
+        src.get("meetingId") or src.get("meeting_id") or src.get("transcriptId")
+        or src.get("transcript_id") or src.get("id")
+    )
+    event_type = src.get("eventType") or src.get("event_type") or src.get("event") or src.get("type")
+    return meeting_id, event_type
+
+
 @router.post("/fireflies/{company_id}")
 async def fireflies_webhook(
     request: Request,
     company_id: str,
-    payload: WebhookPayload,
     background_tasks: BackgroundTasks,
     token: Optional[str] = Query(default=None),
     x_webhook_token: Optional[str] = Header(default=None),
 ):
-    """
-    Fireflies webhook scoped to an explicit company (override of domain routing).
-    """
+    """Fireflies webhook scoped to an explicit company (override of domain routing)."""
     await _verify(request, token, x_webhook_token)
     company_id = config.normalize_company_id(company_id)
-    if not _should_process(payload.eventType):
-        return {"status": "ignored", "eventType": payload.eventType}
-    logger.info(f"Fireflies webhook (explicit tenant='{company_id}'): meetingId={payload.meetingId}")
-    background_tasks.add_task(process_meeting, payload.meetingId, company_id)
-    return {"status": "processing", "company_id": company_id, "meeting_id": payload.meetingId}
+    meeting_id, event_type = await _parse_event(request)
+    if not meeting_id:
+        return {"status": "ok", "message": "No meetingId in payload (test ping received)."}
+    if not _should_process(event_type):
+        return {"status": "ignored", "eventType": event_type}
+    logger.info(f"Fireflies webhook (explicit tenant='{company_id}'): meetingId={meeting_id} event={event_type}")
+    background_tasks.add_task(process_meeting, meeting_id, company_id)
+    return {"status": "processing", "company_id": company_id, "meeting_id": meeting_id}
 
 
 @router.post("/fireflies")
 async def fireflies_webhook_autoroute(
     request: Request,
-    payload: WebhookPayload,
     background_tasks: BackgroundTasks,
     token: Optional[str] = Query(default=None),
     x_webhook_token: Optional[str] = Header(default=None),
 ):
     """
     Single webhook for one Fireflies account serving many companies. The tenant is
-    resolved from attendee email domains (see companies registry); unmatched
-    meetings go to the 'unassigned' quarantine tenant for manual assignment.
+    resolved from attendee email domains; unmatched meetings go to 'unassigned'.
     """
     await _verify(request, token, x_webhook_token)
-    if not _should_process(payload.eventType):
-        return {"status": "ignored", "eventType": payload.eventType}
-    logger.info(f"Fireflies webhook (auto-route): meetingId={payload.meetingId}")
-    background_tasks.add_task(process_meeting, payload.meetingId, None)
-    return {"status": "processing", "routing": "by-domain", "meeting_id": payload.meetingId}
+    meeting_id, event_type = await _parse_event(request)
+    if not meeting_id:
+        return {"status": "ok", "message": "No meetingId in payload (test ping received)."}
+    if not _should_process(event_type):
+        return {"status": "ignored", "eventType": event_type}
+    logger.info(f"Fireflies webhook (auto-route): meetingId={meeting_id} event={event_type}")
+    background_tasks.add_task(process_meeting, meeting_id, None)
+    return {"status": "processing", "routing": "by-domain", "meeting_id": meeting_id}

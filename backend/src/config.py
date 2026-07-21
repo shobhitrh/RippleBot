@@ -50,6 +50,9 @@ if not POSTGRES_URI:
 # API Keys
 VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY2")
 FIREFLIES_API_KEY = os.getenv("FIREFLIES_API_KEY")
+# Optional shared secret to authenticate Fireflies webhook calls. If set, the
+# webhook URL must include ?token=<this> (or an X-Webhook-Token header).
+FIREFLIES_WEBHOOK_SECRET = os.getenv("FIREFLIES_WEBHOOK_SECRET")
 
 
 def _valid_key(k):

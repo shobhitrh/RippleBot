@@ -220,14 +220,25 @@ def _attendee_emails(t: dict) -> list:
 async def process_meeting(meeting_id: str, company_id: str = None):
     """
     Fetch → (resolve tenant by attendee email domain if not given) → build markdown
-    → save to that company's KB → index (Voyage embeddings). Unmatched meetings go
-    to the 'unassigned' quarantine tenant so nothing lands in the wrong company.
+    → save to that company's KB → index (Voyage embeddings).
+
+    Auto-routed meetings that DON'T match a known company domain are DISCARDED
+    (not ingested) — the workspace has lots of internal/scrum calls we don't want
+    to store or review. Only meetings with a recognized client domain are kept.
+    Explicit imports (Import-by-ID / the /{company_id} route) always ingest.
     """
     try:
         transcript = await fetch_transcript(meeting_id)
 
-        if not company_id:
+        auto = not company_id
+        if auto:
             company_id = companies.resolve_company_from_emails(_attendee_emails(transcript))
+            if company_id == companies.UNASSIGNED_ID:
+                logger.info(
+                    f"Fireflies: meeting {meeting_id} has no known client domain — discarded "
+                    f"(attendees: {_attendee_emails(transcript)[:5]})"
+                )
+                return
             logger.info(f"Fireflies: routed meeting {meeting_id} → tenant '{company_id}' by email domain")
         else:
             company_id = config.normalize_company_id(company_id)

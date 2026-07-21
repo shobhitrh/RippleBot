@@ -72,6 +72,8 @@ There are **two GitHub repos** and it matters which you deploy from:
 | `GEMINI_API_KEY` | `<key>` | final LLM fallback |
 | `CORS_ORIGINS` | `https://ripple-bot.vercel.app` | your Vercel domain, comma-separated for multiple; no trailing slash |
 | `EMBED_DIM` | *(unset)* | auto-detected (voyage-4-large = 1024); set only to override |
+| `FIREFLIES_API_KEY` | `<key>` | Fireflies API key used to fetch transcripts. **Use a workspace-admin key** to access meetings you weren't in (see §11). |
+| `FIREFLIES_WEBHOOK_SECRET` | `<secret>` | Shared secret for the webhook. Sent as `?token=` on the webhook URL (or Fireflies HMAC "Signing Secret"). |
 | `DEFAULT_COMPANY_ID` | *(unset)* | defaults to `default` |
 
 `DATABASE_URL` is read as a fallback if `POSTGRES_URI` is unset — but set `POSTGRES_URI` explicitly to the reference.
@@ -213,3 +215,68 @@ Put API keys in a root `.env` or `backend/.env` (both are gitignored). The front
 - [ ] Vercel: repo `RippleBot`, Root Directory `knowledge-navigator`, `VITE_API_URL` set
 - [ ] `CORS_ORIGINS` = Vercel domain, API redeployed
 - [ ] Upload a doc → indexes → query returns a grounded answer → other tenant is isolated
+
+---
+
+## 11. Fireflies meeting ingestion
+
+Meetings become RAG-searchable per company. We use Fireflies for the transcript +
+its own AI summary/action-items (no LLM keys spent summarizing); we only spend
+Voyage (embeddings) + Groq/Gemini (answering questions).
+
+### How it works
+```
+Fireflies "Meeting Summarized" webhook → { meetingId }  (just a trigger)
+      │
+      ▼
+Backend fetches transcript(id) { sentences + summary } via the Fireflies API
+      │
+      ▼
+Route to a company by attendee EMAIL DOMAIN (companies registry)
+      • known domain (e.g. pinelabs.com) → that company
+      • no known domain              → DISCARDED (not stored) ← see below
+      ▼
+Save FF_<title>_<date>.md (Fireflies summary + FULL transcript) → embed → chat
+```
+
+- **Company routing is by attendee email domain, not meeting content.** The
+  registry (`GET/POST /api/companies`, persisted at `knowledge_base/companies.json`)
+  maps domains → companies, e.g. `pinelabs.com → pinelabs`. Add clients via the
+  UI "Add company" (name + domain) or the API.
+- **Unmatched meetings are discarded**, not quarantined. The workspace has many
+  internal/scrum calls; storing/reviewing them is noise. Only meetings whose
+  attendees include a **registered client domain** are ingested. (Design choice —
+  changed from an "unassigned" review inbox.)
+- **Lossless:** the full speaker-labeled transcript is stored + embedded, so the
+  chat can answer anything discussed — Fireflies' summary sits on top for display.
+
+### Configure in Fireflies
+- **Webhook URL:** `https://<api>/api/webhooks/fireflies?token=<FIREFLIES_WEBHOOK_SECRET>`
+  (single URL; auto-routes by domain). Explicit override: `/api/webhooks/fireflies/<company_id>`.
+- **Event:** *Meeting Summarized* (so both transcript AND Fireflies summary are ready).
+- **Auth:** the `?token=` must equal `FIREFLIES_WEBHOOK_SECRET` (or use the HMAC
+  "Signing Secret" field with the same value).
+
+### Ways meetings get in
+1. **Live (automatic):** the webhook → domain routing.
+2. **Past/manual:** Meeting Logs → **Import by ID** (transcript id) → pins to the
+   selected company. Endpoint: `POST /api/documents/import-fireflies` (X-Company-Id header).
+3. **Reassign:** the **Move to…** dropdown on a meeting card → `POST /api/documents/{file}/assign`.
+
+### Capturing meetings you weren't invited to (org-wide) — IMPORTANT
+A **personal** Fireflies API key only sees **your own** meetings. To ingest every
+Pine Labs meeting across a 100+ person org (including ones you're not in):
+
+1. Be a **Fireflies workspace admin** on a plan that supports **team/workspace
+   webhooks + admin API** (Business/Enterprise).
+2. Use a **workspace-admin API key** as `FIREFLIES_API_KEY` — only an admin key can
+   fetch transcripts of meetings you didn't attend.
+3. Configure the webhook at the **workspace level** ("all meetings in the
+   workspace", not just yours), so every member's meeting fires it.
+4. Domain routing then keeps only the ones with a `@pinelabs.com` attendee and
+   discards the rest — fully automatic, no manual review.
+
+Prerequisite: Fireflies must actually be recording those meetings (the org has it
+deployed team-wide / bot auto-joins). If workspace webhooks aren't on your plan, a
+fallback is a scheduled job that polls the admin API for recent workspace
+transcripts and ingests any with a client domain.

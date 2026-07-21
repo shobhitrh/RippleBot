@@ -48,9 +48,6 @@ export function CompanySelector() {
             {c.name}
           </SelectItem>
         ))}
-        <SelectItem value="unassigned" className="text-amber-600">
-          ⚠ Unassigned (review)
-        </SelectItem>
         <SelectItem value={ADD_NEW} className="text-accent">
           <span className="flex items-center gap-1.5">
             <Plus className="h-3.5 w-3.5" /> Add company…

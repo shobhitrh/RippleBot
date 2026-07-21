@@ -1,0 +1,577 @@
+import os
+import re
+import json
+import sqlite3
+import logging
+from typing import Dict, Any, Optional
+from datetime import datetime
+from pydantic import BaseModel
+from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
+from fastapi.concurrency import run_in_threadpool
+from backend.src import config
+from backend.src.rag_engine import get_engine
+from backend.src.excel_parser import get_db_path, sanitize_name
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/chat", tags=["chat"])
+
+NO_ANSWER = "I couldn't find this information in our meeting archives or knowledge base."
+
+def _sse(obj: dict) -> str:
+    """Encode a dict as one Server-Sent-Events frame."""
+    return f"data: {json.dumps(obj)}\n\n"
+
+async def _single_message_stream(text: str, sources: list = None):
+    """Emit a sources frame, one token frame, and done — used for graceful states."""
+    yield _sse({"type": "sources", "sources": sources or []})
+    yield _sse({"type": "token", "text": text})
+    yield _sse({"type": "done"})
+
+class QueryFilters(BaseModel):
+    department: Optional[str] = None
+    date_from: Optional[str] = None  # Expects YYYY-MM-DD
+
+class QueryPayload(BaseModel):
+    query: str
+    filters: Optional[QueryFilters] = None
+
+async def route_and_execute(query_text: str) -> Optional[dict]:
+    """
+    Query-Time Router: Classify query dynamically using LLM.
+    If it requires SQL (count, average, sum, min, max, global filters),
+    it generates the exact SQLite query, runs it against Tier C, and
+    formats the results to bypass semantic vector search and guarantee no data loss.
+    """
+    db_path = get_db_path()
+    if not os.path.exists(db_path):
+        return None
+        
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [row[0] for row in cursor.fetchall() if not row[0].startswith("sqlite_") and row[0] != "__table_metadata__"]
+        if not tables:
+            conn.close()
+            return None
+            
+        # Get table titles mapping from metadata table
+        table_titles = {}
+        try:
+            cursor.execute("SELECT table_name, title FROM __table_metadata__")
+            table_titles = dict(cursor.fetchall())
+        except Exception:
+            pass
+            
+        schema = {}
+        for t in tables:
+            cursor.execute(f"PRAGMA table_info({t})")
+            cols = cursor.fetchall()
+            col_info = []
+            for c in cols:
+                col_name = c[1]
+                col_type = c[2]
+                try:
+                    cursor.execute(f'SELECT DISTINCT "{col_name}" FROM "{t}" WHERE "{col_name}" IS NOT NULL LIMIT 25')
+                    raw_samples = [str(r[0]).strip() for r in cursor.fetchall() if r[0] is not None]
+                    samples = [s for s in raw_samples if s and len(s) < 60]
+                    if samples:
+                        sample_str = f" [Sample values: {', '.join(samples[:15])}]"
+                    else:
+                        sample_str = ""
+                except Exception:
+                    sample_str = ""
+                col_info.append(f"{col_name} ({col_type}){sample_str}")
+            schema[t] = col_info
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to read SQLite schema: {e}")
+        return None
+
+    # Construct schema description for prompt
+    schema_desc = ""
+    for t, cols in schema.items():
+        title = table_titles.get(t)
+        title_str = f" (Table Title: \"{title}\")" if title else ""
+        schema_desc += f"Table: {t}{title_str}\nColumns:\n"
+        for c in cols:
+            schema_desc += f"  - {c}\n"
+        schema_desc += "\n"
+
+    system_msg = """You are an SQL routing agent. Your job is to analyze the user's query and decide if it requires querying the SQLite database tables (SQL) or doing a semantic text search (VECTOR).
+
+Use {"route": "SQL", "sql_query": "..."} ONLY for questions that specifically require quantitative data analysis from tables: metrics, numbers, counts, aggregations, exact date lookups, mandays, fees, pricing options, or checking specific table cell values based on conditions.
+Use {"route": "VECTOR"} for questions that require explaining concepts, describing what something consists of, summarization, general knowledge from the documents, or if the question is conversational (e.g. "hi", "hello", "thanks").
+
+EXAMPLES:
+
+Example 1 (Cell Lookup for Row Metric):
+User Query: "What is the growth rate for Q3 in the financial report?"
+Output: {"route": "SQL", "sql_query": "SELECT q3_growth FROM quarterly_metrics_table_1 WHERE LOWER(col_0) LIKE '%growth%'"}
+
+Example 2 (Pure Count Query):
+User Query: "How many tickets have high priority?"
+Output: {"route": "SQL", "sql_query": "SELECT COUNT(*) FROM support_tickets_table_1 WHERE LOWER(priority) = LOWER('high')"}
+
+Example 3 (List and Count Query):
+User Query: "How many questions have medium criticality? What are they?"
+Output: {"route": "SQL", "sql_query": "SELECT id, requirement, criticality FROM questions_table_1 WHERE LOWER(criticality) = LOWER('medium')"}
+
+RULES:
+1. ONLY write SELECT queries. Never write write/update queries.
+2. Only reference tables and columns EXACTLY as defined in the schema.
+3. CRITICAL: SQLite string comparisons are case-sensitive when using '='. You MUST always use LOWER(column) LIKE '%value%' or LOWER(column) = LOWER('value') for any string comparison filters to avoid case mismatch errors.
+4. CRITICAL INSTRUCTION FOR ROW METRICS: Look at the sample values for col_0 in each table schema. If col_0 contains metric/row names such as 'YoY', 'Manday', 'Total', 'Total License Fees', 'Year 1', 'Year 2', etc., and the user asks for one of these metrics or line items (such as 'yoy' or 'yoy rate'), you MUST select that row directly using: SELECT <column> FROM <table> WHERE LOWER(col_0) LIKE '%metric%'. DO NOT perform percentage difference formulas like (col2 - col1) / col1.
+5. CRITICAL: NEVER combine aggregate functions (e.g. COUNT(*), SUM()) with un-aggregated column names in the same SELECT statement without a GROUP BY (e.g. NEVER write SELECT COUNT(id), id). If the user asks both "how many" and "what are they", SELECT the matching rows directly (e.g. SELECT id, requirement, criticality FROM ...); the downstream assistant will count the rows automatically.
+6. Output ONLY the JSON block, no markdown, no other text.
+"""
+
+    prompt = f"""Available Database Schema:
+{schema_desc}
+
+User Query: {query_text}
+
+JSON Output:"""
+
+    response_text = None
+    for gkey in config.GROQ_API_KEYS:
+        try:
+            from groq import Groq
+            client = Groq(api_key=gkey)
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                max_tokens=300
+            )
+            response_text = completion.choices[0].message.content
+            logger.info(f"LLM Router Response: {response_text}")
+            if response_text:
+                break
+        except Exception:
+            continue
+            
+    if not response_text and config.GEMINI_API_KEY:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=config.GEMINI_API_KEY)
+            model = genai.GenerativeModel("gemini-2.0-flash", system_instruction=system_msg)
+            completion = model.generate_content(prompt)
+            response_text = completion.text
+        except Exception:
+            pass
+            
+    if not response_text:
+        return None
+        
+    try:
+        clean_json = response_text.strip()
+        if "```" in clean_json:
+            clean_json = re.sub(r'^```[a-zA-Z]*\n?|```$', '', clean_json, flags=re.MULTILINE).strip()
+        
+        json_match = re.search(r'\{.*\}', clean_json, re.DOTALL)
+        if json_match:
+            clean_json = json_match.group(0)
+            
+        try:
+            data = json.loads(clean_json, strict=False)
+        except Exception:
+            fixed_json = re.sub(r"\\'", "'", clean_json)
+            fixed_json = re.sub(r'\\([^"\\/bfnrtu])', r'\1', fixed_json)
+            data = json.loads(fixed_json, strict=False)
+        if data.get("route") == "SQL" and data.get("sql_query"):
+            sql = data["sql_query"]
+            logger.info(f"Query-Time Router selected SQL path: {sql}")
+            
+            # Execute SQL
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            col_names = [d[0] for d in cursor.description]
+            conn.close()
+            
+            # Format results as a neat markdown table
+            is_empty = True
+            if rows:
+                for r in rows:
+                    if any(v is not None and str(v).strip() != "" and str(v).lower() != "none" for v in r):
+                        is_empty = False
+                        break
+            
+            if not rows or is_empty:
+                logger.info(f"SQL query returned 0 rows or only null values. Falling back to vector search. SQL: {sql}")
+                return None
+                
+            results_md = f"SQL Query executed: `{sql}`\n\n"
+            results_md += "| " + " | ".join(col_names) + " |\n"
+            results_md += "| " + " | ".join(["---"] * len(col_names)) + " |\n"
+            for r in rows[:40]:
+                results_md += "| " + " | ".join(str(v) for v in r) + " |\n"
+                    
+            # Match tables inside the SQL query to their source files for UI citations
+            matched_files = []
+            sql_lower = sql.lower()
+            for t_name in schema.keys():
+                if t_name in sql_lower:
+                    for f in os.listdir(config.DOCUMENTS_DIR):
+                        if sanitize_name(f) in t_name:
+                            matched_files.append(f)
+                            break
+                            
+            sources = []
+            for f in set(matched_files):
+                sources.append({
+                    "filename": f,
+                    "relative_path": f"./backend/knowledge_base/{f}",
+                    "exact_snippet_text": f"SQL Query: {sql}\n\nResults:\n{results_md}",
+                    "score": 1.0
+                })
+                
+            return {
+                "route": "SQL",
+                "sql_query": sql,
+                "results_markdown": results_md,
+                "sources": sources
+            }
+    except Exception as e:
+        logger.error(f"SQL Router execution failed: {e}. Falling back to semantic search.")
+        
+    return None
+
+@router.post("/query")
+async def chat_query(payload: QueryPayload):
+    """
+    Retrieve relevant chunks from the configured vector store (backend-agnostic:
+    ChromaDB or pgvector), then stream an onboarding-assistant answer with sources.
+    Degrades gracefully — never 500s — when the store is offline or empty.
+    """
+    query_text = (payload.query or "").strip()
+    if not query_text:
+        return StreamingResponse(
+            _single_message_stream("Please enter a question."),
+            media_type="text/event-stream",
+        )
+
+    # Detect if query is a simple greeting or general assistant request
+    clean_query = re.sub(r"[^\w\s]", "", query_text.lower()).strip()
+    greetings = {
+        "hi",
+        "hello",
+        "hey",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "greetings",
+        "yo",
+        "sup",
+        "hola",
+        "namaste",
+    }
+    is_conversational = clean_query in greetings or clean_query in {
+        "who are you",
+        "what can you do",
+        "help",
+        "who is this",
+        "what is your name",
+    }
+
+    # 1. Attempt Query-Time SQL Routing (Tier C) for calculations and aggregations
+    sql_result = None
+    if not is_conversational:
+        try:
+            sql_result = await route_and_execute(query_text)
+        except Exception as e:
+            logger.error(f"Error in SQL query routing: {e}")
+
+    if sql_result:
+        # Stream using SQL results as context block
+        sources = sql_result["sources"]
+        
+        async def sql_chat_stream_generator():
+            yield _sse({"type": "sources", "sources": sources})
+            
+            context_block = f"[Database Query Results]\n{sql_result['results_markdown']}"
+            system_prompt = """You are RippleBot, a smart enterprise onboarding and knowledge assistant.
+Your main job is to answer questions about the organization, documents, meetings, and processes using the provided context snippets.
+
+CRITICAL INSTRUCTIONS ON SOURCES AND CITATIONS:
+- NEVER include inline source citations, file names, dates, or source links in your response text (e.g. do NOT write things like '[Source: file.xlsx]', 'Source: ...', or reference filenames in parentheses).
+- The user interface automatically displays clickable file badges at the bottom of your response based on the returned sources list.
+
+CRITICAL INSTRUCTIONS ON COUNTING AND SUMMARIES:
+- You have been provided with raw SQL database results answering the user's question.
+- Rely 100% on the SQL query results to state counts, averages, lists, or filters. They are exact and mathematically correct.
+- State the final answer clearly and directly in a human-friendly format.
+"""
+            user_prompt = f"""Context Snippets:
+{context_block}
+
+Question: {query_text}
+
+Answer:"""
+            
+            streamed = False
+            for i, gkey in enumerate(config.GROQ_API_KEYS, 1):
+                try:
+                    from groq import Groq
+                    client = Groq(api_key=gkey)
+                    stream = client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=0,
+                        stream=True,
+                    )
+                    for chunk in stream:
+                        token = chunk.choices[0].delta.content or ""
+                        if token:
+                            streamed = True
+                            yield _sse({"type": "token", "text": token})
+                    if streamed:
+                        yield _sse({"type": "done"})
+                        return
+                except Exception as e:
+                    if streamed:
+                        yield _sse({"type": "done"})
+                        return
+                    continue
+                    
+            if config.GEMINI_API_KEY:
+                try:
+                    import google.generativeai as genai
+                    genai.configure(api_key=config.GEMINI_API_KEY)
+                    model = genai.GenerativeModel(
+                        "gemini-2.0-flash", system_instruction=system_prompt
+                    )
+                    resp = model.generate_content(user_prompt, stream=True)
+                    for chunk in resp:
+                        token = getattr(chunk, "text", "") or ""
+                        if token:
+                            streamed = True
+                            yield _sse({"type": "token", "text": token})
+                    if streamed:
+                        yield _sse({"type": "done"})
+                        return
+                except Exception as e:
+                    logger.error(f"Gemini SQL stream failed: {e}")
+                    
+            yield _sse({
+                "type": "token",
+                "text": "⚠️ LLMs failed to formulate natural language response."
+            })
+            yield _sse({"type": "done"})
+            
+        return StreamingResponse(sql_chat_stream_generator(), media_type="text/event-stream")
+
+    # 2. Fallback Path: Standard Vector Search (Tiers A/B)
+    retrieved = []
+    engine = None
+    if not is_conversational:
+        # Get the shared engine; degrade cleanly if the vector store is offline.
+        engine = get_engine(required=False)
+        if engine is not None:
+            # Retrieve + rerank (embedding-based dense search)
+            try:
+                result = await run_in_threadpool(engine.query, query_text, 12, False)
+                retrieved = (
+                    result.get("sources", []) if isinstance(result, dict) else []
+                )
+            except Exception as e:
+                logger.error(f"Retrieval failed: {e}")
+                return StreamingResponse(
+                    _single_message_stream(
+                        "Sorry — I hit an error searching the knowledge base. "
+                        "Check that the embedding API key is valid and the backend is healthy."
+                    ),
+                    media_type="text/event-stream",
+                )
+
+    # 3. Build the SSE sources payload + LLM context from retrieved chunks.
+    MAX_CONTEXT_CHARS = 28000
+    MAX_SNIPPET_CHARS = 12000
+    sources = []
+    context_snippets = []
+    used_chars = 0
+    
+    # Deduplicate citations to prevent repeated badges
+    seen_cite = set()
+    for s in retrieved:
+        meta = s.get("metadata") or {}
+        content = s.get("text", "")
+        filename = (
+            meta.get("source_name")
+            or os.path.basename(meta.get("source", ""))
+            or "Unknown"
+        )
+        
+        # Unique identifier for the source chunk
+        cite_key = (filename, meta.get("sheet"), content[:80])
+        if cite_key in seen_cite:
+            continue
+        seen_cite.add(cite_key)
+
+        sources.append(
+            {
+                "filename": filename,
+                "relative_path": f"./backend/knowledge_base/{filename}",
+                "exact_snippet_text": content,
+                "score": float(s.get("score", 0.0) or 0.0),
+            }
+        )
+
+    # Deduplicate context lines to prevent repeats in the prompt
+    seen_lines = set()
+    for idx, s in enumerate(retrieved, 1):
+        meta = s.get("metadata") or {}
+        content = s.get("text", "")
+        filename = (
+            meta.get("source_name")
+            or os.path.basename(meta.get("source", ""))
+            or "Unknown"
+        )
+
+        # Remove overlapping line repeats
+        deduped_lines = []
+        for line in content.split("\n"):
+            line_strip = line.strip()
+            if line_strip and line_strip in seen_lines:
+                continue
+            if line_strip:
+                seen_lines.add(line_strip)
+            deduped_lines.append(line)
+        cleaned_content = "\n".join(deduped_lines).strip()
+        if not cleaned_content:
+            continue
+
+        if used_chars >= MAX_CONTEXT_CHARS:
+            continue
+        snippet = cleaned_content[:MAX_SNIPPET_CHARS]
+        remaining = MAX_CONTEXT_CHARS - used_chars
+        if len(snippet) > remaining:
+            snippet = snippet[:remaining] + "\n…[truncated]"
+        used_chars += len(snippet)
+        source_date = (
+            meta.get("date")
+            or (meta.get("indexed_at", "") or "")[:10]
+            or "Unknown Date"
+        )
+        context_snippets.append(
+            f"[Source {idx}: {filename} (Date: {source_date})]\n{snippet}"
+        )
+
+    # 4. Build the streaming generator (sources first, then LLM tokens).
+    async def chat_stream_generator():
+        yield _sse({"type": "sources", "sources": sources})
+
+        context_block = (
+            "\n\n---\n\n".join(context_snippets)
+            if context_snippets
+            else "(No context snippets found in the database.)"
+        )
+
+        system_prompt = """You are RippleBot, a smart enterprise onboarding and knowledge assistant.
+Your main job is to answer questions about the organization, documents, meetings, and processes using the provided context snippets.
+
+CRITICAL INSTRUCTIONS ON SOURCES AND CITATIONS:
+- NEVER include inline source citations, file names, dates, or source links in your response text (e.g. do NOT write things like '[Source: file.xlsx]', 'Source: ...', or reference filenames in parentheses).
+- The user interface automatically displays clickable file badges at the bottom of your response based on the returned sources list.
+
+CRITICAL INSTRUCTIONS ON COUNTING AND SUMMARIES:
+- If a question asks for a count, list, or summation of items (e.g. "How many...", "List all...", "How many good-to-haves..."):
+  1. Carefully find all instances of those items across the entire provided context block.
+  2. List the items step-by-step mentally or in your reasoning to count them accurately.
+  3. Ensure that the total count you state matches the list of items you present.
+  4. If the context has fragmented blocks, merge them to avoid contradictory statements (like "we have 4... here are 6").
+
+If the user's query is a simple greeting (e.g., "hi", "hello", "hey", "good morning") or asks about who you are or what you can do, respond politely and explain that you are RippleBot, an enterprise assistant here to help answer questions based on meeting transcripts and documents in the knowledge base.
+
+For specific questions about the company, documents, or data:
+- If context snippets are provided and contain the answer, answer the question accurately using ONLY the provided context.
+- If the answer is not contained in the context, or if no context snippets are found, respond clearly: "I couldn't find this information in our meeting archives or knowledge base."
+Do not make up facts outside the context.
+Do not use introductory phrases like "Based on the provided context..." or "According to the snippets...". Answer the user's question directly and concisely as if you are a human coordinator.
+"""
+
+        user_prompt = f"""Context Snippets:
+{context_block}
+
+Question: {query_text}
+
+Answer:"""
+
+        streamed = False
+
+        # Priority 1..N: Groq llama-3.3-70b-versatile, one key after another.
+        for i, gkey in enumerate(config.GROQ_API_KEYS, 1):
+            try:
+                from groq import Groq
+
+                client = Groq(api_key=gkey)
+                stream = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0,
+                    stream=True,
+                )
+                for chunk in stream:
+                    token = chunk.choices[0].delta.content or ""
+                    if token:
+                        streamed = True
+                        yield _sse({"type": "token", "text": token})
+                if streamed:
+                    yield _sse({"type": "done"})
+                    return
+                logger.warning(
+                    f"Groq key #{i} produced no output. Trying next channel…"
+                )
+            except Exception as e:
+                if streamed:
+                    logger.error(f"Groq key #{i} failed mid-stream: {e}")
+                    yield _sse({"type": "done"})
+                    return
+                logger.warning(f"Groq key #{i} failed: {e}. Trying next channel…")
+                continue
+
+        # Final fallback: Google Gemini.
+        if config.GEMINI_API_KEY:
+            try:
+                import google.generativeai as genai
+
+                genai.configure(api_key=config.GEMINI_API_KEY)
+                model = genai.GenerativeModel(
+                    "gemini-2.0-flash", system_instruction=system_prompt
+                )
+                resp = model.generate_content(user_prompt, stream=True)
+                for chunk in resp:
+                    token = getattr(chunk, "text", "") or ""
+                    if token:
+                        streamed = True
+                        yield _sse({"type": "token", "text": token})
+                if streamed:
+                    yield _sse({"type": "done"})
+                    return
+                logger.warning("Gemini produced no output.")
+            except Exception as e:
+                logger.error(f"Gemini fallback failed: {e}")
+
+        # Nothing worked.
+        yield _sse(
+            {
+                "type": "token",
+                "text": "⚠️ Every LLM channel failed (Groq keys and Gemini). "
+                "Check that at least one of GROQ_API_KEY/2/3 or GEMINI_API_KEY is valid in .env.",
+            }
+        )
+        yield _sse({"type": "done"})
+
+    return StreamingResponse(chat_stream_generator(), media_type="text/event-stream")

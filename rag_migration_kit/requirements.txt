@@ -1,0 +1,28 @@
+# RAG Migration Kit - Requirements
+
+# Core & Config
+python-dotenv>=1.0.0
+
+# Vector Database & APIs
+voyageai>=0.2.0
+chromadb>=0.4.0
+psycopg2-binary>=2.9.0
+pgvector>=0.2.0
+tiktoken>=0.5.0
+groq>=0.4.0
+
+# Document Parsing
+pandas>=2.0.0
+pdfplumber>=0.10.0
+openpyxl>=3.1.0
+tabulate>=0.9.0
+python-docx>=1.0.0
+PyMuPDF>=1.23.0
+
+# Utilities & Math
+numpy>=1.24.0
+rapidfuzz>=3.6.0
+
+# Optional Evaluation (Ragas)
+ragas>=0.1.0
+datasets>=2.14.0

@@ -1,0 +1,76 @@
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Base Paths
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+WORKSPACE_ROOT = BACKEND_DIR.parent
+
+# Load environment from known locations regardless of the launch directory.
+# Load the workspace-root .env first, then backend/.env (backend wins on overlap),
+# then any CWD .env. This ensures keys like GROQ_API_KEY2/3 and GEMINI_API_KEY are
+# picked up whether uvicorn is started from the repo root or from backend/.
+load_dotenv(WORKSPACE_ROOT / ".env", override=True)
+load_dotenv(BACKEND_DIR / ".env", override=True)
+load_dotenv(override=True)
+
+# Target folder for staged/uploaded files
+DOCUMENTS_DIR = os.getenv("DOCUMENTS_DIR")
+if not DOCUMENTS_DIR:
+    DOCUMENTS_DIR = str(BACKEND_DIR / "knowledge_base")
+else:
+    # Resolve relative to workspace root if it's relative
+    p = Path(DOCUMENTS_DIR)
+    if not p.is_absolute():
+        DOCUMENTS_DIR = str(WORKSPACE_ROOT / DOCUMENTS_DIR)
+
+# Ensure directory exists
+Path(DOCUMENTS_DIR).mkdir(parents=True, exist_ok=True)
+
+# Vector store backend selection: "chroma" (embedded, zero-setup, default) or
+# "pgvector" (PostgreSQL — needs a running server / connection string).
+VECTOR_BACKEND = os.getenv("VECTOR_BACKEND", "chroma").strip().lower()
+
+# ChromaDB persistence directory (embedded local store — no server required).
+CHROMA_DIR = os.getenv("CHROMA_DIR")
+if not CHROMA_DIR:
+    CHROMA_DIR = str(BACKEND_DIR / "chroma_db")
+else:
+    p = Path(CHROMA_DIR)
+    if not p.is_absolute():
+        CHROMA_DIR = str(WORKSPACE_ROOT / CHROMA_DIR)
+
+# Database Credentials (only used when VECTOR_BACKEND == "pgvector")
+POSTGRES_URI = os.getenv("POSTGRES_URI") or os.getenv("DATABASE_URL")
+# Default local development fallback if not provided
+if not POSTGRES_URI:
+    POSTGRES_URI = "postgresql://postgres:postgres@localhost:5432/argushr"
+
+# API Keys
+VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY2")
+FIREFLIES_API_KEY = os.getenv("FIREFLIES_API_KEY")
+
+
+def _valid_key(k):
+    """Treat empty / placeholder values (e.g. 'your_..._here') as unset."""
+    return bool(k) and not k.strip().lower().startswith("your_")
+
+
+# Groq keys, tried in order for fallback (GROQ_API_KEY -> _2 -> _3).
+GROQ_API_KEYS = [
+    k for k in (
+        os.getenv("GROQ_API_KEY"),
+        os.getenv("GROQ_API_KEY2"),
+        os.getenv("GROQ_API_KEY3"),
+    ) if _valid_key(k)
+]
+# Backwards-compatible single-key alias (first valid Groq key).
+GROQ_API_KEY = GROQ_API_KEYS[0] if GROQ_API_KEYS else None
+
+# Final fallback LLM after all Groq keys fail.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") if _valid_key(os.getenv("GEMINI_API_KEY")) else None
+
+# Server Config
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", "8000"))
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")

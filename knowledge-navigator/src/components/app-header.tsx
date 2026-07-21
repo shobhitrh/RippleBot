@@ -1,0 +1,170 @@
+import { useEffect, useState } from "react";
+import { Search, Circle } from "lucide-react";
+import { apiFetch, useBackoffPoll } from "@/lib/api";
+import { SidebarTrigger } from "@/components/ui/sidebar";
+import { Separator } from "@/components/ui/separator";
+import { Button } from "@/components/ui/button";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { useNavigate } from "@tanstack/react-router";
+
+export function AppHeader() {
+  const [open, setOpen] = useState(false);
+  const [files, setFiles] = useState<any[]>([]);
+  const [backendStatus, setBackendStatus] = useState<"active" | "error" | "indexing">("indexing");
+  const [vectorStatus, setVectorStatus] = useState<"active" | "error" | "indexing">("indexing");
+  const navigate = useNavigate();
+
+  const ping = async () => {
+    try {
+      const r = await apiFetch("/api/health", { timeoutMs: 8000 });
+      if (r.ok) {
+        const d = await r.json();
+        setBackendStatus("active");
+        setVectorStatus(d?.vector_db?.status === "connected" ? "active" : "error");
+        return true;
+      }
+    } catch {
+      /* fall through to offline state */
+    }
+    setBackendStatus("error");
+    setVectorStatus("error");
+    return false;
+  };
+
+  useBackoffPoll(ping, { baseMs: 10000, maxMs: 60000 });
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const fetchSearchData = async () => {
+      try {
+        const res = await apiFetch("/api/documents");
+        if (res.ok) {
+          const data = await res.json();
+          setFiles(data);
+        }
+      } catch (e) {
+        console.error("Failed to load search data:", e);
+      }
+    };
+    fetchSearchData();
+  }, [open]);
+
+  return (
+    <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b bg-background/80 px-4 backdrop-blur-sm">
+      <SidebarTrigger />
+      <Separator orientation="vertical" className="h-6" />
+      <button
+        onClick={() => setOpen(true)}
+        className="flex h-9 flex-1 max-w-md items-center gap-2 rounded-lg border bg-muted/40 px-3 text-sm text-muted-foreground transition-all duration-150 hover:bg-muted hover:border-border/60"
+      >
+        <Search className="h-4 w-4" />
+        <span className="flex-1 text-left">Search files, meetings, prompts...</span>
+        <kbd className="rounded border bg-background px-1.5 py-0.5 text-[10px] font-mono hidden sm:block">
+          Ctrl+K
+        </kbd>
+      </button>
+
+      <div className="ml-auto flex items-center gap-2">
+        <StatusPill label="API" status={backendStatus} text={backendStatus === "active" ? "Online" : backendStatus === "error" ? "Offline" : "..."} />
+        <StatusPill label="Vector DB" status={vectorStatus} text={vectorStatus === "active" ? "Active" : vectorStatus === "error" ? "Error" : "..."} />
+        <Button variant="ghost" size="sm">
+          Settings
+        </Button>
+        <Avatar className="h-8 w-8">
+          <AvatarFallback className="bg-accent text-accent-foreground text-xs font-semibold">
+            AC
+          </AvatarFallback>
+        </Avatar>
+      </div>
+
+      <CommandDialog open={open} onOpenChange={setOpen}>
+        <CommandInput placeholder="Search files, meetings, and actions..." />
+        <CommandList>
+          <CommandEmpty>No results.</CommandEmpty>
+          <CommandGroup heading="Navigate">
+            <CommandItem onSelect={() => { setOpen(false); navigate({ to: "/chat" }); }}>
+              Open Chatbot Assistant
+            </CommandItem>
+            <CommandItem onSelect={() => { setOpen(false); navigate({ to: "/knowledge" }); }}>
+              Knowledge Base
+            </CommandItem>
+            <CommandItem onSelect={() => { setOpen(false); navigate({ to: "/meetings" }); }}>
+              Meeting Logs
+            </CommandItem>
+          </CommandGroup>
+          <CommandGroup heading="Files">
+            {files.filter((f) => !f.filename.startsWith("FF_")).slice(0, 5).map((f) => (
+              <CommandItem key={f.filename} onSelect={() => { setOpen(false); navigate({ to: "/knowledge" }); }}>
+                {f.filename}
+              </CommandItem>
+            ))}
+            {files.filter((f) => !f.filename.startsWith("FF_")).length === 0 && (
+              <div className="px-3 py-2 text-xs text-muted-foreground">No files uploaded yet.</div>
+            )}
+          </CommandGroup>
+          <CommandGroup heading="Meetings">
+            {files.filter((f) => f.filename.startsWith("FF_")).slice(0, 5).map((f) => {
+              const cleanName = f.filename.replace(/^FF_/, "").replace(/\.md$/, "").replace(/_/g, " ");
+              return (
+                <CommandItem key={f.filename} onSelect={() => { setOpen(false); navigate({ to: "/meetings" }); }}>
+                  {cleanName}
+                </CommandItem>
+              );
+            })}
+            {files.filter((f) => f.filename.startsWith("FF_")).length === 0 && (
+              <div className="px-3 py-2 text-xs text-muted-foreground">No meetings synced yet.</div>
+            )}
+          </CommandGroup>
+        </CommandList>
+      </CommandDialog>
+    </header>
+  );
+}
+
+function StatusPill({
+  label,
+  status,
+  text,
+}: {
+  label: string;
+  status: "active" | "indexing" | "error";
+  text: string;
+}) {
+  const dotColor =
+    status === "active"
+      ? "text-emerald-500"
+      : status === "indexing"
+      ? "text-amber-500"
+      : "text-red-500";
+
+  const pulse = status === "active";
+
+  return (
+    <div className="hidden md:flex items-center gap-1.5 rounded-lg border bg-card px-2.5 py-1 text-xs transition-all duration-300">
+      <span className={`relative flex h-2 w-2 ${pulse ? "animate-pulse" : ""}`}>
+        <Circle className={`h-2 w-2 fill-current ${dotColor}`} />
+      </span>
+      <span className="text-muted-foreground">{label}:</span>
+      <span className="font-medium">{text}</span>
+    </div>
+  );
+}

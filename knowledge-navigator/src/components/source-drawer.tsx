@@ -164,41 +164,41 @@ export function SourceDrawer({
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full sm:max-w-xl md:max-w-2xl lg:max-w-3xl overflow-y-auto">
-        <SheetHeader>
-          <SheetTitle className="flex items-center justify-between w-full">
-            <span className="flex items-center gap-2">
-              <FileText className="h-4 w-4 text-indigo-500" />
-              {file ?? "Source"}
+        <SheetHeader className="px-3 sm:px-6 pt-4">
+          <SheetTitle className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 w-full pr-6">
+            <span className="flex items-center gap-2 truncate text-sm sm:text-base">
+              <FileText className="h-4 w-4 text-indigo-500 shrink-0" />
+              <span className="truncate">{file ?? "Source"}</span>
             </span>
             {file && (
               <a
                 href={apiUrl(`/api/documents/${encodeURIComponent(file)}/download`)}
                 download
-                className="inline-flex items-center gap-1.5 text-xs font-normal text-indigo-500 hover:text-indigo-600 transition-colors mr-6 border border-indigo-200 rounded-md px-2.5 py-1.5 bg-indigo-50/50 hover:bg-indigo-50"
+                className="inline-flex items-center gap-1.5 text-xs font-normal text-indigo-500 hover:text-indigo-600 transition-colors border border-indigo-200 rounded-md px-2.5 py-1 bg-indigo-50/50 hover:bg-indigo-50 shrink-0 self-start sm:self-auto"
               >
                 <Download className="h-3.5 w-3.5" />
                 Download Original
               </a>
             )}
           </SheetTitle>
-          <SheetDescription>
+          <SheetDescription className="text-xs sm:text-sm">
             Retrieved section from the ingested knowledge base.
           </SheetDescription>
         </SheetHeader>
-        <div className="mt-4 space-y-4 px-4 pb-6">
+        <div className="mt-4 space-y-4 px-3 sm:px-6 pb-6">
           {snippet && (
-            <div className="rounded-md border-l-2 border-indigo-500 bg-muted/40 p-3 text-sm">
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            <div className="rounded-md border-l-2 border-indigo-500 bg-muted/40 p-3 text-xs sm:text-sm">
+              <p className="text-[10px] sm:text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 Matched snippet
               </p>
               <p className="mt-1 whitespace-pre-wrap">{snippet}</p>
             </div>
           )}
           <div>
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground mb-2">
+            <p className="text-[10px] sm:text-xs font-medium uppercase tracking-wide text-muted-foreground mb-2">
               Full document preview
             </p>
-            <div className="rounded-md border bg-muted/30 p-4 max-h-[70vh] overflow-y-auto">
+            <div className="rounded-md border bg-muted/30 p-3 sm:p-4 max-h-[65vh] sm:max-h-[70vh] overflow-y-auto">
               {renderParsedContent(previewText)}
             </div>
           </div>

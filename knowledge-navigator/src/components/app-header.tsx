@@ -70,29 +70,32 @@ export function AppHeader() {
   }, [open]);
 
   return (
-    <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b bg-background/80 px-4 backdrop-blur-sm">
-      <SidebarTrigger />
-      <Separator orientation="vertical" className="h-6" />
+    <header className="sticky top-0 z-30 flex h-14 items-center gap-1.5 border-b bg-background/80 px-2.5 backdrop-blur-sm sm:gap-3 sm:px-4">
+      <SidebarTrigger className="shrink-0" />
+      <Separator orientation="vertical" className="hidden h-6 sm:block" />
       <button
         onClick={() => setOpen(true)}
-        className="flex h-9 flex-1 max-w-md items-center gap-2 rounded-lg border bg-muted/40 px-3 text-sm text-muted-foreground transition-all duration-150 hover:bg-muted hover:border-border/60"
+        className="flex h-9 min-w-0 flex-1 max-w-md items-center gap-1.5 rounded-lg border bg-muted/40 px-2.5 text-xs sm:text-sm text-muted-foreground transition-all duration-150 hover:bg-muted hover:border-border/60"
       >
-        <Search className="h-4 w-4" />
-        <span className="flex-1 text-left">Search files, meetings, prompts...</span>
+        <Search className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
+        <span className="flex-1 truncate text-left">
+          <span className="sm:hidden">Search…</span>
+          <span className="hidden sm:inline">Search files, meetings, prompts...</span>
+        </span>
         <kbd className="rounded border bg-background px-1.5 py-0.5 text-[10px] font-mono hidden sm:block">
           Ctrl+K
         </kbd>
       </button>
 
-      <div className="ml-auto flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-1 sm:gap-2">
         <CompanySelector />
         <StatusPill label="API" status={backendStatus} text={backendStatus === "active" ? "Online" : backendStatus === "error" ? "Offline" : "..."} />
         <StatusPill label="Vector DB" status={vectorStatus} text={vectorStatus === "active" ? "Active" : vectorStatus === "error" ? "Error" : "..."} />
-        <Button variant="ghost" size="sm">
+        <Button variant="ghost" size="sm" className="hidden sm:inline-flex" onClick={() => navigate({ to: "/settings" })}>
           Settings
         </Button>
-        <Avatar className="h-8 w-8">
-          <AvatarFallback className="bg-accent text-accent-foreground text-xs font-semibold">
+        <Avatar className="h-7 w-7 sm:h-8 sm:w-8 shrink-0">
+          <AvatarFallback className="bg-accent text-accent-foreground text-[10px] sm:text-xs font-semibold">
             AC
           </AvatarFallback>
         </Avatar>

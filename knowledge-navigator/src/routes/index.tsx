@@ -114,12 +114,12 @@ function Overview() {
   ];
 
   return (
-    <div className="mx-auto max-w-7xl space-y-8 p-6 animate-in-fade">
+    <div className="mx-auto max-w-7xl space-y-5 sm:space-y-8 p-3.5 sm:p-6 animate-in-fade">
       {/* Header */}
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 sm:gap-4">
         <div>
-          <div className="flex items-center gap-2.5 mb-1">
-            <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
+          <div className="flex flex-wrap items-center gap-2.5 mb-1">
+            <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Overview</h1>
             {backendOnline === true && (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-medium text-emerald-600 ring-1 ring-emerald-500/20">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
@@ -133,11 +133,11 @@ function Overview() {
               </span>
             )}
           </div>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-xs sm:text-sm text-muted-foreground">
             Your organization's collective knowledge, indexed and queryable.
           </p>
         </div>
-        <Button asChild className="gap-2">
+        <Button asChild className="gap-2 w-full sm:w-auto shrink-0">
           <Link to="/chat">
             <MessageSquare className="h-4 w-4" />
             Open Assistant
@@ -146,7 +146,7 @@ function Overview() {
       </div>
 
       {/* Stat cards */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 sm:gap-4 grid-cols-2 lg:grid-cols-4">
         {stats.map((s) => (
           <Card
             key={s.label}
@@ -155,25 +155,25 @@ function Overview() {
             <div
               className={`absolute inset-0 bg-gradient-to-br ${s.color} pointer-events-none`}
             />
-            <CardHeader className="relative pb-2 pt-4 px-4">
+            <CardHeader className="relative pb-1.5 sm:pb-2 pt-3 sm:pt-4 px-3 sm:px-4">
               <div className="flex items-center justify-between">
-                <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                <CardTitle className="text-[10px] sm:text-xs font-medium text-muted-foreground uppercase tracking-wide truncate">
                   {s.label}
                 </CardTitle>
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-card/80 ring-1 ring-border">
-                  <s.icon className={`h-4 w-4 ${s.iconColor}`} />
+                <div className="flex h-7 w-7 sm:h-8 sm:w-8 items-center justify-center rounded-lg bg-card/80 ring-1 ring-border shrink-0">
+                  <s.icon className={`h-3.5 w-3.5 sm:h-4 sm:w-4 ${s.iconColor}`} />
                 </div>
               </div>
             </CardHeader>
-            <CardContent className="relative px-4 pb-4">
-              <div className="text-3xl font-bold tracking-tight">
+            <CardContent className="relative px-3 sm:px-4 pb-3 sm:pb-4">
+              <div className="text-xl sm:text-3xl font-bold tracking-tight">
                 {loading && s.value === null ? (
-                  <span className="text-muted-foreground/50 text-xl">---</span>
+                  <span className="text-muted-foreground/50 text-lg sm:text-xl">---</span>
                 ) : (
                   s.value
                 )}
               </div>
-              <p className="mt-0.5 text-xs text-muted-foreground">{s.sub}</p>
+              <p className="mt-0.5 text-[10px] sm:text-xs text-muted-foreground truncate">{s.sub}</p>
             </CardContent>
           </Card>
         ))}
@@ -183,20 +183,20 @@ function Overview() {
       <div className="grid gap-4 lg:grid-cols-3">
         {/* Recent ingestions */}
         <Card className="lg:col-span-2">
-          <CardHeader className="flex-row items-center justify-between pb-3">
+          <CardHeader className="flex flex-row items-center justify-between pb-3 px-4 sm:px-6">
             <div>
-              <CardTitle className="text-base">Recent ingestions</CardTitle>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Latest files pushed to /backend/knowledge_base/
+              <CardTitle className="text-sm sm:text-base">Recent ingestions</CardTitle>
+              <p className="text-[11px] sm:text-xs text-muted-foreground mt-0.5">
+                Latest files pushed to knowledge base
               </p>
             </div>
-            <Button variant="ghost" size="sm" asChild className="text-xs">
+            <Button variant="ghost" size="sm" asChild className="text-xs shrink-0">
               <Link to="/knowledge">
                 View all <ArrowRight className="h-3.5 w-3.5" />
               </Link>
             </Button>
           </CardHeader>
-          <CardContent className="space-y-2">
+          <CardContent className="space-y-2 px-3 sm:px-6">
             {files.slice(0, 5).map((f) => {
               const isFireflies = f.filename.startsWith("FF_");
               const sizeStr =
@@ -207,15 +207,15 @@ function Overview() {
               return (
                 <div
                   key={f.filename}
-                  className="flex items-center justify-between rounded-xl border bg-muted/20 px-3 py-2.5 hover:bg-muted/40 transition-colors duration-150"
+                  className="flex flex-col xs:flex-row xs:items-center justify-between gap-1.5 xs:gap-2 rounded-xl border bg-muted/20 px-3 py-2.5 hover:bg-muted/40 transition-colors duration-150"
                 >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-card ring-1 ring-border">
+                  <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                    <div className="flex h-7 w-7 sm:h-8 sm:w-8 shrink-0 items-center justify-center rounded-lg bg-card ring-1 ring-border">
                       <FileText className="h-3.5 w-3.5 text-muted-foreground" />
                     </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{f.filename}</div>
-                      <div className="text-xs text-muted-foreground">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-xs sm:text-sm font-medium">{f.filename}</div>
+                      <div className="text-[10px] sm:text-xs text-muted-foreground truncate">
                         {isFireflies ? "Fireflies auto-sync" : "Manual upload"} &middot;{" "}
                         {dateAdded} &middot; {sizeStr}
                       </div>
@@ -223,7 +223,7 @@ function Overview() {
                   </div>
                   <Badge
                     variant={f.index_status === "indexed" ? "default" : "secondary"}
-                    className="ml-2 capitalize shrink-0 text-xs"
+                    className="self-start xs:self-center capitalize shrink-0 text-[10px] sm:text-xs"
                   >
                     {f.index_status}
                   </Badge>

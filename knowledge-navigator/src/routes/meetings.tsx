@@ -85,34 +85,34 @@ function MeetingsPage() {
   };
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 p-6 animate-in-fade">
-      <div className="flex items-start justify-between">
+    <div className="mx-auto max-w-7xl space-y-4 sm:space-y-6 p-3.5 sm:p-6 animate-in-fade">
+      <div className="flex flex-col xs:flex-row xs:items-start justify-between gap-2 sm:gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Fireflies Meeting Logs</h1>
-          <p className="text-sm text-muted-foreground">
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight">Fireflies Meeting Logs</h1>
+          <p className="text-xs sm:text-sm text-muted-foreground">
             Auto-ingested transcripts, converted to structured Markdown.
           </p>
         </div>
-        <Badge variant="outline" className="gap-1.5">
+        <Badge variant="outline" className="gap-1.5 self-start shrink-0 text-xs">
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-ping" />
           Webhook connected
         </Badge>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-3 sm:gap-4 md:grid-cols-2">
         {meetings.map((m) => (
           <Card key={m.id} className="group hover:border-accent/50 transition-all duration-300">
-            <CardHeader>
+            <CardHeader className="p-4 sm:p-6 pb-2 sm:pb-3">
               <div className="flex items-start justify-between gap-3">
-                <CardTitle className="text-base leading-snug">{m.title}</CardTitle>
-                <Badge variant="secondary" className="shrink-0 text-xs">
+                <CardTitle className="text-sm sm:text-base leading-snug">{m.title}</CardTitle>
+                <Badge variant="secondary" className="shrink-0 text-[10px] sm:text-xs">
                   Fireflies
                 </Badge>
               </div>
-              <p className="text-sm text-muted-foreground">{m.summary}</p>
+              <p className="text-xs sm:text-sm text-muted-foreground mt-1">{m.summary}</p>
             </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <CardContent className="p-4 sm:p-6 pt-0 space-y-3">
+              <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] sm:text-xs text-muted-foreground">
                 <span className="flex items-center gap-1">
                   <Calendar className="h-3.5 w-3.5" /> {m.date}
                 </span>
@@ -123,12 +123,12 @@ function MeetingsPage() {
                   <Users className="h-3.5 w-3.5" /> {m.participants.join(", ")}
                 </span>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <Button size="sm" variant="outline" onClick={() => setPreview(m.markdownFile)}>
+              <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                <Button size="sm" variant="outline" className="w-full sm:w-auto text-xs" onClick={() => setPreview(m.markdownFile)}>
                   <FileText className="h-3.5 w-3.5" />
                   View Cleaned MD
                 </Button>
-                <Button size="sm" variant="ghost" onClick={() => resummarize(m.title)}>
+                <Button size="sm" variant="ghost" className="w-full sm:w-auto text-xs" onClick={() => resummarize(m.title)}>
                   <RefreshCw className="h-3.5 w-3.5" />
                   Re-summarize
                 </Button>

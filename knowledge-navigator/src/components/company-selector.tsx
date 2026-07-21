@@ -30,10 +30,10 @@ export function CompanySelector() {
   return (
     <Select value={selected} onValueChange={onChange}>
       <SelectTrigger
-        className="h-9 w-[190px] gap-2 border-border/70 bg-card text-sm"
+        className="h-9 w-[105px] xs:w-[125px] sm:w-[190px] gap-1 sm:gap-2 border-border/70 bg-card text-xs sm:text-sm px-2 sm:px-3 shrink-0"
         aria-label="Select company"
       >
-        <Building2 className="h-4 w-4 shrink-0 text-accent" />
+        <Building2 className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0 text-accent" />
         <SelectValue placeholder="Select company" />
       </SelectTrigger>
       <SelectContent>

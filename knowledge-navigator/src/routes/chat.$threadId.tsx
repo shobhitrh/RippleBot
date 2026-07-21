@@ -20,7 +20,9 @@ import {
   X,
   Mic,
   MicOff,
+  History,
 } from "lucide-react";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -62,6 +64,7 @@ function ChatThreadView() {
   const [sourceOpen, setSourceOpen] = useState<{ file: string; snippet?: string } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT);
+  const [mobileThreadsOpen, setMobileThreadsOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -336,7 +339,15 @@ function ChatThreadView() {
     return d !== today && d !== yesterday;
   });
 
-  const ThreadGroup = ({ label, items }: { label: string; items: typeof threads }) => {
+  const ThreadGroup = ({
+    label,
+    items,
+    onSelect,
+  }: {
+    label: string;
+    items: typeof threads;
+    onSelect?: () => void;
+  }) => {
     if (items.length === 0) return null;
     return (
       <div className="mb-2">
@@ -344,7 +355,7 @@ function ChatThreadView() {
           {label}
         </p>
         {items.map((t) => (
-          <ThreadItem key={t.id} t={t} active={t.id === threadId} onDelete={remove} />
+          <ThreadItem key={t.id} t={t} active={t.id === threadId} onDelete={remove} onSelect={onSelect} />
         ))}
       </div>
     );
@@ -423,9 +434,9 @@ function ChatThreadView() {
       {/* ── Main chat area ── */}
       <main className="flex flex-1 flex-col min-w-0 overflow-hidden">
         {/* Top bar */}
-        <div className="flex items-center justify-between gap-2 border-b bg-background/80 backdrop-blur-sm px-4 py-2.5 shrink-0">
-          <div className="flex items-center gap-2 min-w-0">
-            {/* Sidebar toggle */}
+        <div className="flex items-center justify-between gap-2 border-b bg-background/80 backdrop-blur-sm px-3 sm:px-4 py-2.5 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+            {/* Sidebar toggle for desktop */}
             <button
               onClick={() => setSidebarOpen((v) => !v)}
               className="hidden md:flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-all duration-150"
@@ -436,6 +447,14 @@ function ChatThreadView() {
                 <PanelLeftOpen className="h-4 w-4" />
               )}
             </button>
+            {/* Mobile threads history trigger button */}
+            <button
+              onClick={() => setMobileThreadsOpen(true)}
+              className="md:hidden flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-all duration-150 shrink-0"
+              title="Conversations history"
+            >
+              <History className="h-4 w-4" />
+            </button>
             <div className="flex items-center gap-2 min-w-0">
               <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent/15">
                 <Sparkles className="h-3.5 w-3.5 text-accent" />
@@ -445,36 +464,36 @@ function ChatThreadView() {
               </span>
             </div>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 shrink-0">
             <Button
               size="sm"
               variant="ghost"
               onClick={exportMd}
-              className="h-8 gap-1.5 text-xs text-muted-foreground"
+              className="h-8 px-2 sm:px-3 gap-1.5 text-xs text-muted-foreground"
             >
               <Download className="h-3.5 w-3.5" />
-              Export
+              <span className="hidden xs:inline">Export</span>
             </Button>
             <Button
               size="sm"
               variant="ghost"
               onClick={newThread}
-              className="h-8 gap-1.5 text-xs text-muted-foreground md:hidden"
+              className="h-8 px-2 sm:px-3 gap-1 text-xs text-muted-foreground md:hidden"
             >
               <Plus className="h-3.5 w-3.5" />
-              New
+              <span>New</span>
             </Button>
           </div>
         </div>
 
         {/* Messages */}
         <ScrollArea ref={scrollRef} className="flex-1 min-h-0">
-          <div className="mx-auto max-w-3xl px-4 py-8">
+          <div className="mx-auto max-w-3xl px-3 sm:px-4 py-4 sm:py-8">
             {messages.length === 0 && !thinking && (
               <EmptyState onPick={(p) => send(p)} />
             )}
 
-            <div className="space-y-6">
+            <div className="space-y-4 sm:space-y-6">
               {messages.map((m, i) => (
                 <MessageBubble
                   key={m.id}
@@ -484,15 +503,14 @@ function ChatThreadView() {
                   onFlag={() => flag(m.id)}
                 />
               ))}
-
             </div>
           </div>
         </ScrollArea>
 
         {/* Input bar */}
-        <div className="border-t bg-background/90 backdrop-blur-sm px-4 py-3 shrink-0">
+        <div className="border-t bg-background/90 backdrop-blur-sm px-2.5 sm:px-4 py-2.5 sm:py-3 shrink-0">
           <div className="mx-auto max-w-3xl">
-            <div className="input-glow flex items-end gap-2 rounded-xl border bg-card px-3 py-2 shadow-sm transition-all duration-200">
+            <div className="input-glow flex items-end gap-1.5 sm:gap-2 rounded-xl border bg-card px-2.5 sm:px-3 py-1.5 sm:py-2 shadow-sm transition-all duration-200">
               <Textarea
                 ref={inputRef}
                 value={input}
@@ -508,14 +526,14 @@ function ChatThreadView() {
                     ? "Listening... Speak your question..."
                     : "Ask anything about your knowledge base..."
                 }
-                className="min-h-[44px] max-h-36 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 text-sm p-1 placeholder:text-muted-foreground/60"
+                className="min-h-[40px] sm:min-h-[44px] max-h-36 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 text-xs sm:text-sm p-1 placeholder:text-muted-foreground/60"
               />
               <Button
                 size="icon"
                 type="button"
                 variant="ghost"
                 onClick={toggleListening}
-                className={`h-9 w-9 shrink-0 rounded-lg transition-all duration-200 ${
+                className={`h-8 w-8 sm:h-9 sm:w-9 shrink-0 rounded-lg transition-all duration-200 ${
                   isListening
                     ? "bg-red-500 text-white hover:bg-red-600 animate-pulse shadow-md shadow-red-500/20"
                     : "text-muted-foreground hover:text-foreground hover:bg-muted"
@@ -532,17 +550,50 @@ function ChatThreadView() {
                 size="icon"
                 onClick={() => send(input)}
                 disabled={!input.trim() || thinking}
-                className="h-9 w-9 shrink-0 rounded-lg bg-accent hover:bg-accent/90 transition-all duration-150 disabled:opacity-40"
+                className="h-8 w-8 sm:h-9 sm:w-9 shrink-0 rounded-lg bg-accent hover:bg-accent/90 transition-all duration-150 disabled:opacity-40"
               >
                 <Send className="h-4 w-4" />
               </Button>
             </div>
-            <p className="mt-1.5 text-center text-[11px] text-muted-foreground/60">
-              Click <Mic className="inline h-3 w-3 text-accent" /> for voice input &middot; Enter to send &middot; Shift+Enter for newline
+            <p className="mt-1 text-center text-[10px] sm:text-[11px] text-muted-foreground/60">
+              Click <Mic className="inline h-3 w-3 text-accent" /> for voice input &middot; Enter to send
             </p>
           </div>
         </div>
       </main>
+
+      {/* ── Mobile Thread History Drawer ── */}
+      <Sheet open={mobileThreadsOpen} onOpenChange={setMobileThreadsOpen}>
+        <SheetContent side="left" className="w-[280px] p-0 bg-sidebar border-sidebar-border text-sidebar-foreground">
+          <SheetHeader className="p-3 border-b border-sidebar-border flex flex-row items-center justify-between space-y-0">
+            <SheetTitle className="text-left text-sm font-semibold text-sidebar-foreground">
+              Conversations
+            </SheetTitle>
+            <button
+              onClick={() => {
+                newThread();
+                setMobileThreadsOpen(false);
+              }}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium bg-sidebar-accent text-sidebar-foreground hover:bg-sidebar-accent/80 transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5 text-sidebar-primary" /> New
+            </button>
+          </SheetHeader>
+          <ScrollArea className="h-[calc(100vh-4rem)] py-2">
+            {threads.length === 0 ? (
+              <div className="px-4 py-8 text-center text-xs text-sidebar-foreground/40">
+                No conversations yet.
+              </div>
+            ) : (
+              <>
+                <ThreadGroup label="Today" items={todayThreads} onSelect={() => setMobileThreadsOpen(false)} />
+                <ThreadGroup label="Yesterday" items={yesterdayThreads} onSelect={() => setMobileThreadsOpen(false)} />
+                <ThreadGroup label="Older" items={olderThreads} onSelect={() => setMobileThreadsOpen(false)} />
+              </>
+            )}
+          </ScrollArea>
+        </SheetContent>
+      </Sheet>
 
       <SourceDrawer
         open={!!sourceOpen}
@@ -559,10 +610,12 @@ function ThreadItem({
   t,
   active,
   onDelete,
+  onSelect,
 }: {
   t: { id: string; title: string };
   active: boolean;
   onDelete: (id: string) => void;
+  onSelect?: () => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(t.title);
@@ -588,6 +641,7 @@ function ThreadItem({
       <Link
         to="/chat/$threadId"
         params={{ threadId: t.id }}
+        onClick={onSelect}
         className="flex min-w-0 flex-1 items-start gap-2 overflow-hidden"
       >
         <MessageSquare className="h-3.5 w-3.5 shrink-0 text-sidebar-primary/70 mt-0.5" />
@@ -734,7 +788,7 @@ function MessageBubble({
       </div>
 
       {/* Content */}
-      <div className={`min-w-0 max-w-[78%] flex flex-col ${isUser ? "items-end" : "items-start"}`}>
+      <div className={`min-w-0 max-w-[88%] sm:max-w-[78%] flex flex-col ${isUser ? "items-end" : "items-start"}`}>
         <div
           className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words ${
             isUser

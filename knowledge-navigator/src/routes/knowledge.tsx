@@ -163,20 +163,20 @@ function KnowledgePage() {
   };
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 p-6 animate-in-fade">
+    <div className="mx-auto max-w-7xl space-y-4 sm:space-y-6 p-3.5 sm:p-6 animate-in-fade">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Knowledge Base</h1>
-        <p className="text-sm text-muted-foreground">
+        <h1 className="text-xl sm:text-2xl font-semibold tracking-tight">Knowledge Base</h1>
+        <p className="text-xs sm:text-sm text-muted-foreground">
           Upload documents and monitor sync to the backend directory and vector store.
         </p>
       </div>
 
       <div className="w-full">
         <Card className="w-full">
-          <CardHeader>
-            <CardTitle>Upload documents</CardTitle>
+          <CardHeader className="px-4 sm:px-6 pt-4 sm:pt-6 pb-2 sm:pb-4">
+            <CardTitle className="text-base sm:text-lg">Upload documents</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="px-4 sm:px-6 pb-4 sm:pb-6">
             <label
               onDragOver={(e) => {
                 e.preventDefault();
@@ -188,17 +188,17 @@ function KnowledgePage() {
                 setDragActive(false);
                 handleFiles(e.dataTransfer.files);
               }}
-              className={`flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed p-10 text-center transition ${
+              className={`flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed p-5 sm:p-10 text-center transition ${
                 dragActive
                   ? "border-accent bg-accent/10"
                   : "border-muted-foreground/25 hover:border-accent/60 hover:bg-muted/40"
               }`}
             >
-              <UploadCloud className="h-8 w-8 text-accent" />
-              <div className="text-sm font-medium">
+              <UploadCloud className="h-7 w-7 sm:h-8 sm:w-8 text-accent" />
+              <div className="text-xs sm:text-sm font-medium">
                 Drop files here, or <span className="text-accent">browse</span>
               </div>
-              <div className="text-xs text-muted-foreground">
+              <div className="text-[11px] sm:text-xs text-muted-foreground">
                 PDF, Excel (.xlsx, .xls), Markdown, DOCX, TXT - up to 20 MB
               </div>
               <input
@@ -213,11 +213,62 @@ function KnowledgePage() {
       </div>
 
       <Card>
-        <CardHeader>
-          <CardTitle>Knowledge directory</CardTitle>
+        <CardHeader className="px-4 sm:px-6 pt-4 sm:pt-6 pb-2 sm:pb-4">
+          <CardTitle className="text-base sm:text-lg">Knowledge directory</CardTitle>
         </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
+        <CardContent className="px-3 sm:px-6 pb-4 sm:pb-6">
+          {/* Mobile Card List View */}
+          <div className="space-y-3 md:hidden">
+            {files.map((f) => (
+              <div
+                key={f.id}
+                className="rounded-xl border bg-card p-3 space-y-2 shadow-xs"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted/60">
+                      <FileText className="h-3.5 w-3.5 text-muted-foreground" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="font-medium text-xs truncate">{f.name}</div>
+                      <div className="text-[10px] text-muted-foreground">
+                        {f.dateAdded} &middot; {f.size}
+                      </div>
+                    </div>
+                  </div>
+                  <StatusBadge status={f.status} />
+                </div>
+
+                <div className="flex items-center justify-between pt-1.5 border-t text-xs">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                      {f.source === "fireflies" ? "Fireflies" : "Manual"}
+                    </Badge>
+                    <span className="text-muted-foreground text-[10px]">{f.chunks} chunks</span>
+                  </div>
+                  <div className="flex items-center gap-0.5">
+                    <Button size="icon" variant="ghost" className="h-7 w-7" title="Download original file" onClick={() => downloadFile(f.name)}>
+                      <Download className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button size="icon" variant="ghost" className="h-7 w-7" title="Re-index status" onClick={() => reindex(f.id)}>
+                      <RefreshCw className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button size="icon" variant="ghost" className="h-7 w-7 text-destructive" title="Delete document" onClick={() => remove(f.id)}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ))}
+            {files.length === 0 && (
+              <div className="py-8 text-center text-xs text-muted-foreground border border-dashed rounded-lg">
+                No documents found.
+              </div>
+            )}
+          </div>
+
+          {/* Desktop Table View */}
+          <div className="hidden md:block overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>

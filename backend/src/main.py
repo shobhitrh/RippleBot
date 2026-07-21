@@ -33,6 +33,36 @@ for logger_name in ("uvicorn.access", "uvicorn", ""):
     for h in l.handlers:
         h.addFilter(PollingLogFilter())
 
+def _index_existing_documents():
+    """Index files already present in each tenant's folder (startup catch-up)."""
+    try:
+        from backend.src.rag_engine import get_engine
+        base = config.DOCUMENTS_DIR
+        if not os.path.isdir(base):
+            return
+        for entry in sorted(os.listdir(base)):
+            tenant_dir = os.path.join(base, entry)
+            if not os.path.isdir(tenant_dir) or entry == "db":
+                continue
+            has_docs = any(
+                os.path.isfile(os.path.join(tenant_dir, f))
+                and not f.endswith(".metadata.json")
+                and not f.startswith(".")
+                for f in os.listdir(tenant_dir)
+            )
+            if not has_docs:
+                continue
+            logger.info(f"Startup indexing: catching up tenant '{entry}'…")
+            try:
+                engine = get_engine(entry, required=False)
+                if engine is not None:
+                    engine.build_index(force_rebuild=False)
+            except Exception:
+                logger.error(f"Startup indexing failed for tenant '{entry}'", exc_info=True)
+    except Exception:
+        logger.error("Startup indexing sweep failed", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Re-apply log filter inside lifespan to ensure we catch runtime uvicorn handlers
@@ -47,7 +77,14 @@ async def lifespan(app: FastAPI):
         start_watcher()
     except Exception as e:
         logger.error(f"Failed to start watchdog folder watcher: {e}")
-    
+
+    # Self-heal on boot: index any files already on disk (e.g. restored from a
+    # persistent volume after a redeploy). Incremental — unchanged files are
+    # skipped via hash check, so this is a no-op when everything is indexed.
+    # Runs in a daemon thread so startup/healthchecks aren't blocked.
+    import threading as _threading
+    _threading.Thread(target=_index_existing_documents, daemon=True).start()
+
     yield
     
     logger.info("Shutting down FastAPI application...")

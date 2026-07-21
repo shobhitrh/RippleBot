@@ -33,6 +33,22 @@ def sanitize_name(name: str) -> str:
         clean = "t_" + clean
     return clean
 
+def coerce_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert columns to numeric where possible, keeping non-numeric columns as-is.
+    Replaces df.apply(pd.to_numeric, errors='ignore'): 'ignore' was removed in
+    pandas 3.x and raises "ValueError: invalid error value specified" — which
+    broke indexing on fresh installs (e.g. Railway) while older local pandas
+    only warned. This per-column try/except works on every pandas version.
+    """
+    def _maybe_numeric(col):
+        try:
+            return pd.to_numeric(col)
+        except (ValueError, TypeError):
+            return col
+    return df.apply(_maybe_numeric)
+
+
 def to_json_serializable(val):
     """Convert numpy or pandas types to JSON-serializable native Python types."""
     import datetime
@@ -128,7 +144,7 @@ def process_csv_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.Dat
     df.columns = cleaned_headers
 
     # Infer real types for SQLite
-    df = df.apply(pd.to_numeric, errors='ignore')
+    df = coerce_numeric_columns(df)
     
     db_table_name = sanitize_name(f"{filename}_default_table")
     chunks = []
@@ -524,7 +540,7 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                 final_columns = ["key", "value"]
             
             # Try parsing numeric types safely
-            df = df.apply(pd.to_numeric, errors='ignore')
+            df = coerce_numeric_columns(df)
             
             db_table_name = sanitize_name(f"{filename}_{sheet_name}_{table_id}")
             sqlite_tables.append((db_table_name, df, table_title))

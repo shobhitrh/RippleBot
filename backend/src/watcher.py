@@ -49,7 +49,9 @@ class DocumentHandler(FileSystemEventHandler):
                 if engine.build_index(force_rebuild=False):
                     logger.info(f"Watcher: Indexing complete for tenant '{cid}'.")
             except Exception as e:
-                logger.error(f"Watcher: Error building index for tenant '{cid}': {e}")
+                # exc_info so the real traceback lands in the logs — a bare str(e)
+                # (e.g. pandas' "invalid error value specified") is undebuggable.
+                logger.error(f"Watcher: Error building index for tenant '{cid}': {e}", exc_info=True)
 
     def on_any_event(self, event):
         if event.is_directory:

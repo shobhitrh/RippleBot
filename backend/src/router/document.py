@@ -117,6 +117,25 @@ uploaded_at: {metadata['uploaded_at']}
         "metadata": metadata
     }
 
+@router.post("/import-fireflies")
+async def import_fireflies_meeting(
+    background_tasks: BackgroundTasks,
+    meeting_id: str = Form(...),
+    company_id: str = CompanyId,
+):
+    """
+    Import a past Fireflies meeting by transcript ID into the selected company.
+    Internal app action (auth = X-Company-Id header, CORS-locked) — reuses the same
+    fetch/summary/index pipeline as the webhook, pinned to this tenant.
+    """
+    from backend.src.router.webhook import process_meeting
+    cid = config.normalize_company_id(company_id)
+    mid = (meeting_id or "").strip()
+    if not mid:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+    background_tasks.add_task(process_meeting, mid, cid)
+    return {"status": "processing", "company_id": cid, "meeting_id": mid}
+
 @router.get("")
 async def list_documents(company_id: str = CompanyId):
     """

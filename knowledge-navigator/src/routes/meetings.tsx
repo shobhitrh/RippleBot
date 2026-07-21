@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Calendar, Clock, Users, RefreshCw, FileText } from "lucide-react";
+import { Calendar, Clock, Users, RefreshCw, FileText, DownloadCloud } from "lucide-react";
 import { mockMeetings, type Meeting } from "@/lib/mock-data";
 import { SourceDrawer } from "@/components/source-drawer";
 import { apiFetch, useBackoffPoll } from "@/lib/api";
@@ -97,6 +97,31 @@ function MeetingsPage() {
 
   useBackoffPoll(fetchMeetings, { baseMs: 5000, maxMs: 45000 });
 
+  const importMeeting = async () => {
+    const id = window.prompt(
+      "Fireflies transcript ID to import into this company:\n(find it in the meeting's Fireflies URL, or via the API)"
+    );
+    if (!id || !id.trim()) return;
+    toast.info(`Importing meeting ${id.trim()} into ${selectedCompany}…`);
+    try {
+      const fd = new FormData();
+      fd.append("meeting_id", id.trim());
+      const res = await apiFetch("/api/documents/import-fireflies", {
+        method: "POST",
+        body: fd,
+        timeoutMs: 60000,
+      });
+      if (res.ok) {
+        toast.success("Import started — the meeting will appear once indexed.");
+        setTimeout(fetchMeetings, 4000);
+      } else {
+        toast.error("Import failed");
+      }
+    } catch {
+      toast.error("Backend connection failed");
+    }
+  };
+
   const resummarize = async (meetingId: string) => {
     toast.info(`Triggering re-summarization webhook for ${meetingId}…`);
     try {
@@ -125,10 +150,16 @@ function MeetingsPage() {
             Auto-ingested transcripts, converted to structured Markdown.
           </p>
         </div>
-        <Badge variant="outline" className="gap-1.5 self-start shrink-0 text-xs">
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-ping" />
-          Webhook connected
-        </Badge>
+        <div className="flex items-center gap-2 self-start shrink-0">
+          <Button size="sm" variant="outline" className="text-xs" onClick={importMeeting}>
+            <DownloadCloud className="h-3.5 w-3.5" />
+            Import by ID
+          </Button>
+          <Badge variant="outline" className="gap-1.5 text-xs">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-ping" />
+            Webhook connected
+          </Badge>
+        </div>
       </div>
 
       <div className="grid gap-3 sm:gap-4 md:grid-cols-2">

@@ -9,6 +9,7 @@ import time
 import json
 import hashlib
 import logging
+import threading
 
 try:
     sys.stdout.reconfigure(encoding='utf-8')
@@ -142,60 +143,81 @@ def discover_files(directory: str) -> List[Dict]:
     return sorted(files, key=lambda x: x['name'])
 
 # ---------------- DOCUMENT PROCESSORS ----------------
+def _render_sheet_rows(df) -> List[str]:
+    """One text line per row, dropping empty cells (read with header=None upstream)."""
+    rows: List[str] = []
+    for _, r in df.iterrows():
+        cells = [str(v).strip() for v in r.tolist()]
+        cells = [c for c in cells if c and c.lower() != "nan"]
+        if cells:
+            rows.append(" | ".join(cells))
+    return rows
+
+
+def _sheet_to_chunks(sheet_name: str, df, overlap_rows: int = 2) -> List[str]:
+    """Token-bounded, self-describing chunks with row overlap; oversized rows hard-split."""
+    rows = _render_sheet_rows(df)
+    if not rows:
+        return []
+    prefix = f"## Sheet: {sheet_name}\n"
+    budget = max(200, config.MAX_TOKENS - count_tokens(prefix))
+    out, cur, cur_tokens = [], [], 0
+
+    def flush(keep_overlap):
+        nonlocal cur, cur_tokens
+        if cur:
+            out.append(prefix + "\n".join(cur))
+            cur = cur[-overlap_rows:] if (keep_overlap and overlap_rows) else []
+            cur_tokens = sum(count_tokens(x) for x in cur)
+
+    for row in rows:
+        t = count_tokens(row)
+        if t > budget:
+            flush(False)
+            toks = enc.encode(row)
+            for s in range(0, len(toks), budget):
+                out.append(prefix + enc.decode(toks[s:s + budget]))
+            continue
+        if cur_tokens + t > budget and cur:
+            flush(True)
+        cur.append(row)
+        cur_tokens += t
+    flush(False)
+    return out
+
+
 def process_excel(file_path: str) -> List[Dict]:
-    """Process Excel file with enhanced metadata."""
-    chunks = []
-    
+    """
+    Process an Excel workbook: every sheet, every row (header=None so nothing is
+    lost/garbled), chunked with overlap. Each chunk carries sheet + chunk_index.
+    """
+    chunks: List[Dict] = []
     try:
         with pd.ExcelFile(file_path) as excel_file:
             for sheet_name in excel_file.sheet_names:
-                df = pd.read_excel(excel_file, sheet_name=sheet_name)
-                
+                df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
+                df = df.dropna(how="all")
                 if df.empty:
                     continue
-            
-            sheet_text = f"## Sheet: {sheet_name}\n\n"
-            sheet_text += df.to_markdown(index=False) if hasattr(df, 'to_markdown') else df.to_string(index=False)
-            
-            if count_tokens(sheet_text) <= config.MAX_TOKENS:
-                chunks.append({
-                    'text': sheet_text,
-                    'metadata': {
-                        'source': file_path,
-                        'source_name': Path(file_path).name,
-                        'sheet': sheet_name,
-                        'type': 'excel',
-                        'rows': len(df),
-                        'columns': list(df.columns),
-                        'indexed_at': datetime.now().isoformat()
-                    }
-                })
-            else:
-                chunk_size = 50
-                for i in range(0, len(df), chunk_size):
-                    chunk_df = df.iloc[i:i+chunk_size]
-                    chunk_text = f"## Sheet: {sheet_name} (Rows {i+1}-{min(i+chunk_size, len(df))})\n\n"
-                    chunk_text += chunk_df.to_markdown(index=False) if hasattr(chunk_df, 'to_markdown') else chunk_df.to_string(index=False)
-                    
+                for ci, part in enumerate(_sheet_to_chunks(sheet_name, df)):
                     chunks.append({
-                        'text': chunk_text,
-                        'metadata': {
-                            'source': file_path,
-                            'source_name': Path(file_path).name,
-                            'sheet': sheet_name,
-                            'type': 'excel',
-                            'row_range': f"{i+1}-{min(i+chunk_size, len(df))}",
-                            'columns': list(df.columns),
-                            'indexed_at': datetime.now().isoformat()
-                        }
+                        "text": part,
+                        "metadata": {
+                            "source": file_path,
+                            "source_name": Path(file_path).name,
+                            "sheet": sheet_name,
+                            "type": "excel",
+                            "chunk_index": ci,
+                            "indexed_at": datetime.now().isoformat(),
+                        },
                     })
-        
-        logger.info(f"✓ Processed {len(excel_file.sheet_names)} sheets from {Path(file_path).name}, created {len(chunks)} chunks")
-        
+            logger.info(
+                f"✓ Processed {len(excel_file.sheet_names)} sheet(s) from "
+                f"{Path(file_path).name}, created {len(chunks)} chunks"
+            )
     except Exception as e:
         logger.error(f"Error processing Excel {file_path}: {e}")
         raise DocumentProcessingError(f"Excel processing failed: {e}")
-    
     return chunks
 
 def process_pdf(file_path: str) -> List[Dict]:
@@ -540,7 +562,7 @@ def process_docx(file_path: str) -> List[Dict]:
         raise DocumentProcessingError(f"Word file processing failed: {e}")
     return chunks
 
-def process_file(file_info: Dict) -> List[Dict]:
+def process_file(file_info: Dict, company_id: str = None) -> List[Dict]:
     """Process file based on type, parsing frontmatter or sidecar metadata if present."""
     file_path = file_info['path']
     file_type = file_info['type']
@@ -560,11 +582,11 @@ def process_file(file_info: Dict) -> List[Dict]:
     chunks = []
     if file_type in ('.xlsx', '.xls'):
         file_chunks, sqlite_tables = process_excel_file(file_path)
-        load_tables_to_sqlite(sqlite_tables)
+        load_tables_to_sqlite(sqlite_tables, company_id)
         chunks = file_chunks
     elif file_type in ('.csv', '.tsv'):
         file_chunks, sqlite_tables = process_csv_file(file_path)
-        load_tables_to_sqlite(sqlite_tables)
+        load_tables_to_sqlite(sqlite_tables, company_id)
         chunks = file_chunks
     else:
         processor = processors.get(file_type)
@@ -616,13 +638,35 @@ def process_file(file_info: Dict) -> List[Dict]:
 class RAGEngine:
     """PostgreSQL/pgvector-based RAG Engine."""
 
-    def __init__(self, connection_uri: str = None):
+    def __init__(self, connection_uri: str = None, company_id: str = None, documents_dir: str = None):
         self.connection_uri = connection_uri or os.getenv("POSTGRES_URI") or os.getenv("DATABASE_URL")
         if not self.connection_uri:
             self.connection_uri = "postgresql://postgres:postgres@localhost:5432/argushr"
+        # Multi-tenant: all rows are tagged with company_id and every query filters
+        # on it, so tenants share the same tables but never see each other's data.
+        self.company_id = company_id or "default"
+        self.documents_dir = documents_dir or os.getenv("DOCUMENTS_DIR") or "documents"
         self.voyage_client = self._get_voyage_client()
+        self.embed_dim = self._detect_embedding_dim()
         self.conn = None
+        self._index_lock = threading.Lock()
         self._init_db()
+
+    def _detect_embedding_dim(self) -> int:
+        """
+        Detect the embedding dimension from the model so the pgvector column size is
+        always correct (voyage-4-large is 1024, not the old hard-coded 1536). Falls
+        back to an env override, then 1024.
+        """
+        env_dim = os.getenv("EMBED_DIM")
+        if env_dim and env_dim.isdigit():
+            return int(env_dim)
+        try:
+            probe = self.voyage_client.embed(["dimension probe"], model=config.EMBED_MODEL)
+            return len(probe.embeddings[0])
+        except Exception as e:
+            logger.warning(f"Could not probe embedding dim ({e}); defaulting to 1024.")
+            return 1024
 
     def is_connected(self) -> bool:
         """Cheaply check whether the underlying connection is still alive."""
@@ -665,10 +709,12 @@ class RAGEngine:
             except Exception as ext_err:
                 logger.warning(f"Could not create vector extension automatically: {ext_err}. Make sure it is installed and enabled.")
             
-            # Create documents table
+            # Create documents table. Multi-tenant: (company_id, filename) composite
+            # PK so different companies can have same-named files without collision.
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS documents (
-                    filename VARCHAR(255) PRIMARY KEY,
+                    company_id VARCHAR(100) NOT NULL DEFAULT 'default',
+                    filename VARCHAR(512) NOT NULL,
                     path TEXT NOT NULL,
                     hash VARCHAR(64) NOT NULL,
                     department VARCHAR(100),
@@ -678,24 +724,28 @@ class RAGEngine:
                     error_message TEXT,
                     vector_count INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (company_id, filename)
                 );
             """)
-            
-            # Create chunks table
-            cursor.execute("""
+
+            # Create chunks table with a matching composite FK + tenant column.
+            cursor.execute(f"""
                 CREATE TABLE IF NOT EXISTS chunks (
                     id VARCHAR(255) PRIMARY KEY,
-                    filename VARCHAR(255) NOT NULL REFERENCES documents(filename) ON DELETE CASCADE,
+                    company_id VARCHAR(100) NOT NULL DEFAULT 'default',
+                    filename VARCHAR(512) NOT NULL,
                     chunk_index INTEGER NOT NULL,
                     content TEXT NOT NULL,
                     metadata JSONB NOT NULL,
-                    embedding vector(1536) NOT NULL
+                    embedding vector({self.embed_dim}) NOT NULL,
+                    FOREIGN KEY (company_id, filename)
+                        REFERENCES documents(company_id, filename) ON DELETE CASCADE
                 );
             """)
-            
-            # Create indices
-            cursor.execute("CREATE INDEX IF NOT EXISTS chunks_filename_idx ON chunks(filename);")
+
+            # Create indices (tenant-aware)
+            cursor.execute("CREATE INDEX IF NOT EXISTS chunks_company_file_idx ON chunks(company_id, filename);")
             try:
                 cursor.execute("CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx ON chunks USING hnsw (embedding vector_cosine_ops);")
             except Exception as idx_err:
@@ -766,7 +816,7 @@ class RAGEngine:
         logger.info("=" * 60)
         logger.info("📂 Discovering documents...")
         
-        files = discover_files(config.DOCUMENTS_DIR)
+        files = discover_files(self.documents_dir)
         
         if not files:
             logger.warning("No documents found. Please add files to documents/ folder")
@@ -780,7 +830,7 @@ class RAGEngine:
         if force_rebuild:
             logger.info("🗑️ Clearing existing index...")
             try:
-                cursor.execute("TRUNCATE TABLE documents CASCADE;")
+                cursor.execute("DELETE FROM documents WHERE company_id = %s", (self.company_id,))
                 logger.info("✅ Database truncated.")
             except Exception as e:
                 logger.error(f"Failed to clear index: {e}")
@@ -791,7 +841,7 @@ class RAGEngine:
         if not force_rebuild:
             try:
                 logger.info("🔍 Retrieving existing documents metadata for change detection...")
-                cursor.execute("SELECT c.id, c.filename, d.hash FROM chunks c JOIN documents d ON c.filename = d.filename")
+                cursor.execute("SELECT c.id, c.filename, d.hash FROM chunks c JOIN documents d ON c.filename = d.filename AND c.company_id = d.company_id WHERE d.company_id = %s", (self.company_id,))
                 rows = cursor.fetchall()
                 for cid, filename, file_hash in rows:
                     if filename not in indexed_files:
@@ -838,7 +888,7 @@ class RAGEngine:
             logger.info(f"🗑️ Deleting chunks for {len(files_to_delete)} removed/modified file(s)...")
             for path in files_to_delete:
                 try:
-                    cursor.execute("DELETE FROM documents WHERE filename = %s", (path,))
+                    cursor.execute("DELETE FROM documents WHERE company_id = %s AND filename = %s", (self.company_id, path))
                     logger.info(f"Deleted {Path(path).name} from PostgreSQL (cascade removed chunks)")
                 except Exception as e:
                     logger.error(f"Failed to delete records for {path}: {e}")
@@ -855,7 +905,7 @@ class RAGEngine:
         all_chunks = []
         for file_info in files_to_process:
             try:
-                chunks = process_file(file_info)
+                chunks = process_file(file_info, self.company_id)
                 all_chunks.extend(chunks)
             except DocumentProcessingError as e:
                 logger.error(f"Skipping {file_info['name']}: {e}")
@@ -901,24 +951,24 @@ class RAGEngine:
                 
             for filename, doc in processed_files.items():
                 cursor.execute("""
-                    INSERT INTO documents (filename, path, hash, department, uploaded_by, category, index_status, vector_count)
-                    VALUES (%s, %s, %s, %s, %s, %s, 'indexed', %s)
-                    ON CONFLICT (filename) DO UPDATE 
+                    INSERT INTO documents (company_id, filename, path, hash, department, uploaded_by, category, index_status, vector_count)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'indexed', %s)
+                    ON CONFLICT (company_id, filename) DO UPDATE
                     SET hash = EXCLUDED.hash, index_status = 'indexed', vector_count = EXCLUDED.vector_count, updated_at = CURRENT_TIMESTAMP
-                """, (filename, doc['path'], doc['hash'], doc['department'], doc['uploaded_by'], doc['category'], doc['vector_count']))
-            
+                """, (self.company_id, filename, doc['path'], doc['hash'], doc['department'], doc['uploaded_by'], doc['category'], doc['vector_count']))
+
             # 2. Insert chunks
             chunk_data = []
             for i, chunk in enumerate(all_chunks):
                 cid = ids[i]
                 filename = chunk['metadata']['source']
                 content = chunk['text']
-                meta_json = json.dumps(chunk['metadata'])
+                meta_json = json.dumps(chunk['metadata'], default=str)
                 embed_str = f"[{','.join(map(str, embeddings[i]))}]"
-                chunk_data.append((cid, filename, chunk['metadata'].get('chunk_id', i), content, meta_json, embed_str))
-            
+                chunk_data.append((cid, self.company_id, filename, chunk['metadata'].get('chunk_index', chunk['metadata'].get('chunk_id', i)), content, meta_json, embed_str))
+
             execute_values(cursor, """
-                INSERT INTO chunks (id, filename, chunk_index, content, metadata, embedding)
+                INSERT INTO chunks (id, company_id, filename, chunk_index, content, metadata, embedding)
                 VALUES %s
             """, chunk_data)
             
@@ -943,29 +993,30 @@ class RAGEngine:
             
         try:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM chunks")
+            cursor.execute("SELECT COUNT(*) FROM chunks WHERE company_id = %s", (self.company_id,))
             count = cursor.fetchone()[0]
         except Exception as e:
             raise QueryError(f"Error checking collection count: {e}")
-                
+
         if count == 0:
             return {
                 'answer': "No documents indexed. Please add documents to the documents/ folder.",
                 'sources': []
             }
-        
+
         # Embed query
         query_embedding = self._embed_with_retry([query_text])[0]
-        
-        # Search PostgreSQL using pgvector Cosine similarity
+
+        # Search PostgreSQL using pgvector Cosine similarity — scoped to this tenant.
         try:
             query_embed_str = f"[{','.join(map(str, query_embedding))}]"
             cursor.execute("""
                 SELECT content, metadata, (1 - (embedding <=> %s::vector)) AS score
                 FROM chunks
+                WHERE company_id = %s
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
-            """, (query_embed_str, query_embed_str, config.TOP_K))
+            """, (query_embed_str, self.company_id, query_embed_str, config.TOP_K))
             rows = cursor.fetchall()
         except Exception as e:
             raise QueryError(f"Error searching PostgreSQL pgvector: {e}")
@@ -1154,34 +1205,30 @@ Answer:"""
         return "⚠️ Error generating response: All attempts exhausted due to rate limits."
     
     def get_chunk_count(self) -> int:
-        """Get number of chunks in collection."""
+        """Get number of chunks for this tenant."""
         if not self.conn:
             return 0
         try:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM chunks")
+            cursor.execute("SELECT COUNT(*) FROM chunks WHERE company_id = %s", (self.company_id,))
             return cursor.fetchone()[0]
         except Exception:
             return 0
-    
+
     def get_doc_count(self) -> int:
-        """Get number of unique source documents."""
+        """Get number of unique source documents for this tenant."""
         if not self.conn:
             return 0
         try:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM documents")
+            cursor.execute("SELECT COUNT(*) FROM documents WHERE company_id = %s", (self.company_id,))
             return cursor.fetchone()[0]
         except Exception:
             return 0
 
     # ---------------- BACKEND-AGNOSTIC HELPERS ----------------
     def list_indexed_documents(self) -> Dict[str, Dict]:
-        """
-        Return indexed-document metadata keyed by base filename, so the API can
-        merge it with the physical files on disk. Backend-agnostic shape shared
-        with the ChromaDB engine.
-        """
+        """Return this tenant's indexed-document metadata keyed by base filename."""
         out: Dict[str, Dict] = {}
         if not self.conn:
             return out
@@ -1189,7 +1236,8 @@ Answer:"""
             cursor = self.conn.cursor()
             cursor.execute(
                 "SELECT filename, department, uploaded_by, category, index_status, "
-                "error_message, vector_count, updated_at FROM documents"
+                "error_message, vector_count, updated_at FROM documents WHERE company_id = %s",
+                (self.company_id,),
             )
             for r in cursor.fetchall():
                 base = os.path.basename(r[0])
@@ -1206,21 +1254,53 @@ Answer:"""
             logger.error(f"list_indexed_documents failed: {e}")
         return out
 
+    def get_chunks_for(self, source_name: str, sheet: str = None) -> List[Dict]:
+        """
+        Return all of this tenant's chunks for a file (optionally a sheet), ordered
+        by chunk_index, so a whole sheet can be loaded into context for aggregation
+        questions. Mirrors the ChromaDB engine's method.
+        """
+        if not self.conn:
+            return []
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT content, metadata, chunk_index FROM chunks "
+                "WHERE company_id = %s AND (filename = %s OR filename LIKE %s) "
+                "ORDER BY chunk_index",
+                (self.company_id, source_name, "%" + source_name),
+            )
+            items = []
+            for content, meta, _ in cursor.fetchall():
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except Exception:
+                        meta = {}
+                if sheet and (meta or {}).get("sheet") != sheet:
+                    continue
+                items.append({"text": content, "metadata": meta or {}})
+            return items
+        except Exception as e:
+            logger.error(f"get_chunks_for failed for {source_name}/{sheet}: {e}")
+            return []
+
     def delete_document(self, filename: str) -> int:
-        """Delete a document and its chunks by (base) filename. Returns rows removed."""
+        """Delete this tenant's document + its chunks + its SQLite tables by filename."""
         try:
             from backend.src.excel_parser import delete_tables_from_sqlite
-            delete_tables_from_sqlite(filename)
+            delete_tables_from_sqlite(filename, self.company_id)
         except Exception as e:
-            logger.error(f"Error dropping SQLite tables in pgvector delete_document: {e}")
+            logger.error(f"Error dropping SQLite tables in delete_document: {e}")
 
         if not self.conn:
             return 0
         try:
             cursor = self.conn.cursor()
             cursor.execute(
-                "DELETE FROM documents WHERE filename = %s OR filename LIKE %s OR filename LIKE %s",
-                (filename, "%" + filename, "%" + filename.replace("\\", "/")),
+                "DELETE FROM documents WHERE company_id = %s AND "
+                "(filename = %s OR filename LIKE %s OR filename LIKE %s)",
+                (self.company_id, filename, "%" + filename, "%" + filename.replace("\\", "/")),
             )
             removed = cursor.rowcount
             if not getattr(self.conn, "autocommit", False):

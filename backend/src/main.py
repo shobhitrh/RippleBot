@@ -1,7 +1,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
 from backend.src import config
 from backend.src.watcher import start_watcher, stop_watcher
@@ -84,24 +84,26 @@ async def root():
     }
 
 @app.get("/api/health")
-async def health_check():
+async def health_check(x_company_id: str = Header(default=config.DEFAULT_COMPANY_ID, alias="X-Company-Id")):
     """
-    Live system health check. Pings Postgres and checks the knowledge_base
-    folder and watcher state to return real-time service status.
+    Live system health check for the requesting tenant. Pings the vector store,
+    checks the company's knowledge_base folder and the watcher state.
     """
     import time
     from backend.src.rag_engine import engine_status
 
+    company_id = config.normalize_company_id(x_company_id)
     result = {
         "api": {"status": "online", "latency_ms": 0},
         "vector_db": {"status": "unknown", "doc_count": 0, "chunk_count": 0},
         "watcher": {"status": "unknown"},
         "knowledge_base_dir": {"status": "unknown", "file_count": 0},
+        "company_id": company_id,
     }
 
-    # Check the configured vector store (backend-agnostic, never raises)
+    # Check the configured vector store for this tenant (never raises)
     t0 = time.monotonic()
-    result["vector_db"] = engine_status()
+    result["vector_db"] = engine_status(company_id)
     result["vector_db"]["latency_ms"] = round((time.monotonic() - t0) * 1000, 1)
 
     # Check watcher
@@ -110,8 +112,8 @@ async def health_check():
         "status": "running" if (_observer and _observer.is_alive()) else "stopped"
     }
 
-    # Check knowledge_base folder
-    kb_dir = config.DOCUMENTS_DIR
+    # Check the company's knowledge_base folder
+    kb_dir = config.company_documents_dir(company_id)
     try:
         files = [f for f in os.listdir(kb_dir) if os.path.isfile(os.path.join(kb_dir, f))]
         result["knowledge_base_dir"] = {

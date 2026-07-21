@@ -12,16 +12,17 @@ import openpyxl
 
 logger = logging.getLogger(__name__)
 
-# Cache of SQLite database path
-DB_PATH = None
-
-def get_db_path() -> str:
-    """Get the SQLite database path, resolving it relative to backend directory."""
-    global DB_PATH
-    if DB_PATH is None:
-        from backend.src import config
-        DB_PATH = os.path.join(config.BACKEND_DIR, "ripplebot_tables.db")
-    return DB_PATH
+def get_db_path(company_id: str = None) -> str:
+    """
+    Per-tenant SQLite database path: <knowledge_base>/db/<company_id>_tables.db.
+    Different companies get physically separate .db files so the SQL router can
+    never read another tenant's tables. Falls back to the default company.
+    """
+    from backend.src import config
+    cid = config.normalize_company_id(company_id or config.DEFAULT_COMPANY_ID)
+    db_dir = os.path.join(config.DOCUMENTS_DIR, "db")
+    os.makedirs(db_dir, exist_ok=True)
+    return os.path.join(db_dir, f"{cid}_tables.db")
 
 def sanitize_name(name: str) -> str:
     """Sanitize filename, sheet name or table ID to be a safe SQL table name."""
@@ -673,9 +674,9 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                     
     return chunks, sqlite_tables
 
-def load_tables_to_sqlite(sqlite_tables: List[Tuple[str, pd.DataFrame, str]]):
-    """Save the parsed tables to the SQLite database (Tier C)."""
-    db_path = get_db_path()
+def load_tables_to_sqlite(sqlite_tables: List[Tuple[str, pd.DataFrame, str]], company_id: str = None):
+    """Save the parsed tables to this tenant's SQLite database (Tier C)."""
+    db_path = get_db_path(company_id)
     try:
         conn = sqlite3.connect(db_path)
         # Create metadata table if not exists
@@ -698,9 +699,9 @@ def load_tables_to_sqlite(sqlite_tables: List[Tuple[str, pd.DataFrame, str]]):
     except Exception as e:
         logger.error(f"Error loading tables to SQLite: {e}")
 
-def delete_tables_from_sqlite(filename: str):
-    """Delete all tables associated with a filename from SQLite."""
-    db_path = get_db_path()
+def delete_tables_from_sqlite(filename: str, company_id: str = None):
+    """Delete all tables associated with a filename from this tenant's SQLite DB."""
+    db_path = get_db_path(company_id)
     if not os.path.exists(db_path):
         return
     prefix = sanitize_name(filename)

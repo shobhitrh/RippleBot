@@ -574,7 +574,7 @@ def process_docx(file_path: str) -> List[Dict]:
         raise DocumentProcessingError(f"Word file processing failed: {e}")
     return chunks
 
-def process_file(file_info: Dict) -> List[Dict]:
+def process_file(file_info: Dict, company_id: str = None) -> List[Dict]:
     """Process file based on type."""
     file_path = file_info['path']
     file_type = file_info['type']
@@ -594,11 +594,11 @@ def process_file(file_info: Dict) -> List[Dict]:
     chunks = []
     if file_type in ('.xlsx', '.xls'):
         file_chunks, sqlite_tables = process_excel_file(file_path)
-        load_tables_to_sqlite(sqlite_tables)
+        load_tables_to_sqlite(sqlite_tables, company_id)
         chunks = file_chunks
     elif file_type in ('.csv', '.tsv'):
         file_chunks, sqlite_tables = process_csv_file(file_path)
-        load_tables_to_sqlite(sqlite_tables)
+        load_tables_to_sqlite(sqlite_tables, company_id)
         chunks = file_chunks
     else:
         processor = processors.get(file_type)
@@ -660,8 +660,13 @@ def _sanitize_metadata(meta: Dict) -> Dict:
 class RAGEngine:
     """ChromaDB-based RAG Engine."""
     
-    def __init__(self, persist_directory: str = None):
+    def __init__(self, persist_directory: str = None, company_id: str = None, documents_dir: str = None):
         self.persist_directory = persist_directory or config.CHROMA_DIR
+        # Multi-tenant isolation: each company gets its OWN Chroma collection, so
+        # one tenant's vectors can never be returned to another.
+        self.company_id = company_id or "default"
+        self.collection_name = f"org_{self.company_id}_documents"
+        self.documents_dir = documents_dir or config.DOCUMENTS_DIR
         self.voyage_client = self._get_voyage_client()
         self.chroma_client = None
         self.collection = None
@@ -669,31 +674,31 @@ class RAGEngine:
         # fire together) so the same new file isn't processed twice into duplicates.
         self._index_lock = threading.Lock()
         self._init_chroma()
-    
+
     def _get_voyage_client(self) -> voyageai.Client:
         """Get Voyage AI client."""
         key = os.getenv("VOYAGE_API_KEY2")
         if not key:
             raise ValueError("VOYAGE_API_KEY2 not set in environment")
         return voyageai.Client(api_key=key)
-    
+
     def _init_chroma(self):
-        """Initialize ChromaDB."""
+        """Initialize ChromaDB for this company's isolated collection."""
         Path(self.persist_directory).mkdir(parents=True, exist_ok=True)
-        
+
         self.chroma_client = chromadb.PersistentClient(
             path=self.persist_directory,
             settings=Settings(anonymized_telemetry=False)
         )
-        
-        # Get or create collection
+
+        # One collection per tenant.
         self.collection = self.chroma_client.get_or_create_collection(
-            name="argushr_documents",
+            name=self.collection_name,
             metadata={"hnsw:space": "cosine"}
         )
-        
-        logger.info(f"✅ ChromaDB initialized at {self.persist_directory}")
-        logger.info(f"   Collection has {self.collection.count()} documents")
+
+        logger.info(f"✅ ChromaDB initialized at {self.persist_directory} (tenant='{self.company_id}')")
+        logger.info(f"   Collection '{self.collection_name}' has {self.collection.count()} documents")
     
     def _embed_with_retry(self, texts: List[str], max_retries: int = 3) -> List[List[float]]:
         """Embed texts with exponential backoff retry."""
@@ -752,7 +757,7 @@ class RAGEngine:
         logger.info("=" * 60)
         logger.info("📂 Discovering documents...")
         
-        files = discover_files(config.DOCUMENTS_DIR)
+        files = discover_files(self.documents_dir)
         
         if not files:
             logger.warning("No documents found. Please add files to documents/ folder")
@@ -763,9 +768,9 @@ class RAGEngine:
         # Clear existing data if rebuilding
         if force_rebuild and self.collection.count() > 0:
             logger.info("🗑️ Clearing existing index...")
-            self.chroma_client.delete_collection("argushr_documents")
+            self.chroma_client.delete_collection(self.collection_name)
             self.collection = self.chroma_client.create_collection(
-                name="argushr_documents",
+                name=self.collection_name,
                 metadata={"hnsw:space": "cosine"}
             )
             logger.info("✅ Collection recreated.")
@@ -847,7 +852,7 @@ class RAGEngine:
         all_chunks = []
         for file_info in files_to_process:
             try:
-                chunks = process_file(file_info)
+                chunks = process_file(file_info, self.company_id)
                 all_chunks.extend(chunks)
             except DocumentProcessingError as e:
                 logger.error(f"Skipping {file_info['name']}: {e}")
@@ -895,7 +900,7 @@ class RAGEngine:
             if "does not exist" in str(e).lower() or "invalid collection" in str(e).lower():
                 logger.info("Collection reference is stale/deleted. Re-fetching collection...")
                 try:
-                    self.collection = self.chroma_client.get_collection("argushr_documents")
+                    self.collection = self.chroma_client.get_collection(self.collection_name)
                     count = self.collection.count()
                 except Exception as inner_e:
                     raise QueryError(f"Failed to recover collection: {inner_e}")
@@ -923,7 +928,7 @@ class RAGEngine:
             if "does not exist" in str(e).lower() or "invalid collection" in str(e).lower():
                 logger.info("Query failed. Re-fetching collection and retrying...")
                 try:
-                    self.collection = self.chroma_client.get_collection("argushr_documents")
+                    self.collection = self.chroma_client.get_collection(self.collection_name)
                     results = self.collection.query(
                         query_embeddings=[query_embedding],
                         n_results=config.TOP_K,
@@ -1175,7 +1180,7 @@ Answer:"""
         """Delete all chunks whose source matches (base) filename. Returns count removed."""
         try:
             from backend.src.excel_parser import delete_tables_from_sqlite
-            delete_tables_from_sqlite(filename)
+            delete_tables_from_sqlite(filename, self.company_id)
             
             if not self.collection or self.collection.count() == 0:
                 return 0

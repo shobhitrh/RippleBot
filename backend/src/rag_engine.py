@@ -1,32 +1,34 @@
 """
-Vector-store engine factory.
+Vector-store engine factory (multi-tenant).
 
-Provides a single, cached RAG engine instance for the whole backend, regardless
-of which vector store is configured (ChromaDB embedded by default, or pgvector).
+Returns a cached RAG engine PER COMPANY, regardless of which vector store is
+configured (ChromaDB embedded by default, or pgvector for cloud/Railway).
 
-Why this exists:
-  * The routers used to construct a fresh engine on every HTTP request, which
-    meant a full (re)connect + schema migration several times a second — and,
-    when the store was unavailable, a full traceback on every poll.
-  * This factory caches one engine, reuses its connection, throttles reconnect
-    attempts, and logs the down-state exactly once. Callers can ask for a
-    graceful ``None`` instead of an exception so the API degrades cleanly.
+Isolation:
+  * ChromaDB  -> one collection per company ("org_<id>_documents").
+  * pgvector  -> shared tables with a company_id column; every query filtered.
+Each company also reads/writes its own documents subdirectory.
+
+Reliability:
+  * One engine per (company) is cached and its connection reused, so we don't
+    reconnect + migrate on every request.
+  * Reconnect attempts while the store is down are throttled per company, and the
+    down-state is logged once. Callers can request a graceful ``None``.
 """
 import time
 import logging
 import threading
-from typing import Optional
 
 from backend.src import config
 
 logger = logging.getLogger(__name__)
 
-# Cached singleton state
-_engine = None
+# Per-company cached engine state
+_engines = {}                 # company_id -> engine
+_last_attempt = {}            # company_id -> monotonic ts of last connect attempt
+_down_logged = set()          # company_ids whose down-state we've already logged
 _lock = threading.Lock()
-_last_attempt = 0.0
 _COOLDOWN_SEC = 10.0
-_down_logged = False
 
 
 class EngineUnavailable(RuntimeError):
@@ -34,71 +36,77 @@ class EngineUnavailable(RuntimeError):
     pass
 
 
-def _build_engine():
-    """Import and construct the configured engine, wiring the correct paths."""
+def _build_engine(company_id: str):
+    """Construct the configured engine for one company, wiring per-tenant paths."""
+    documents_dir = config.company_documents_dir(company_id)
     backend = config.VECTOR_BACKEND
     if backend == "pgvector":
-        from rag_migration_kit.rag_pgvector import RAGEngine, Config as EngineConfig
-        EngineConfig.set_documents_dir(config.DOCUMENTS_DIR)
-        return RAGEngine(connection_uri=config.POSTGRES_URI)
+        from rag_migration_kit.rag_pgvector import RAGEngine
+        return RAGEngine(
+            connection_uri=config.POSTGRES_URI,
+            company_id=company_id,
+            documents_dir=documents_dir,
+        )
 
     # Default: ChromaDB (embedded, no server required)
-    from rag_migration_kit.rag_chromadb import RAGEngine, Config as EngineConfig
-    EngineConfig.set_documents_dir(config.DOCUMENTS_DIR)
-    EngineConfig.CHROMA_DIR = config.CHROMA_DIR
-    return RAGEngine(persist_directory=config.CHROMA_DIR)
+    from rag_migration_kit.rag_chromadb import RAGEngine
+    return RAGEngine(
+        persist_directory=config.CHROMA_DIR,
+        company_id=company_id,
+        documents_dir=documents_dir,
+    )
 
 
-def get_engine(required: bool = True):
+def get_engine(company_id: str = None, required: bool = True):
     """
-    Return the shared engine, (re)connecting lazily. Reconnect attempts while the
-    store is down are throttled to once per cooldown window so we neither hammer
-    nor spam logs.
+    Return the cached engine for ``company_id`` (defaults to DEFAULT_COMPANY_ID),
+    (re)connecting lazily and throttling reconnects while the store is down.
 
     :param required: when False, returns ``None`` on failure instead of raising.
     """
-    global _engine, _last_attempt, _down_logged
+    cid = config.normalize_company_id(company_id or config.DEFAULT_COMPANY_ID)
 
     with _lock:
-        # Fast path: healthy cached engine.
-        if _engine is not None and _engine.is_connected():
-            return _engine
+        eng = _engines.get(cid)
+        # Fast path: healthy cached engine for this tenant.
+        if eng is not None and eng.is_connected():
+            return eng
 
         now = time.monotonic()
-        if _engine is not None and (now - _last_attempt) < _COOLDOWN_SEC:
-            # Still within the cooldown after a recent failure — stay quiet.
+        if eng is not None and (now - _last_attempt.get(cid, 0.0)) < _COOLDOWN_SEC:
             if required:
                 raise EngineUnavailable(
                     f"{config.VECTOR_BACKEND} vector store unavailable (retry throttled)."
                 )
             return None
 
-        _last_attempt = now
+        _last_attempt[cid] = now
         try:
-            if _engine is None:
-                _engine = _build_engine()
+            if eng is None:
+                eng = _build_engine(cid)
+                _engines[cid] = eng
             else:
-                _engine.reconnect()
-            if _down_logged:
-                logger.info(f"✅ RAG engine reconnected ({config.VECTOR_BACKEND}).")
-            _down_logged = False
-            return _engine
+                eng.reconnect()
+            if cid in _down_logged:
+                logger.info(f"✅ RAG engine reconnected ({config.VECTOR_BACKEND}, tenant='{cid}').")
+                _down_logged.discard(cid)
+            return eng
         except Exception as e:
             first_line = str(e).splitlines()[0] if str(e) else repr(e)
-            if not _down_logged:
+            if cid not in _down_logged:
                 logger.warning(
-                    f"Vector store '{config.VECTOR_BACKEND}' unavailable — RAG features "
-                    f"degraded until it is reachable. Reason: {first_line}"
+                    f"Vector store '{config.VECTOR_BACKEND}' unavailable for tenant '{cid}' — "
+                    f"RAG features degraded until reachable. Reason: {first_line}"
                 )
-                _down_logged = True
+                _down_logged.add(cid)
             if required:
                 raise EngineUnavailable(first_line)
             return None
 
 
-def engine_status() -> dict:
+def engine_status(company_id: str = None) -> dict:
     """Lightweight status snapshot for the health endpoint (never raises)."""
-    eng = get_engine(required=False)
+    eng = get_engine(company_id, required=False)
     if eng is None:
         return {"status": "error", "backend": config.VECTOR_BACKEND, "doc_count": 0, "chunk_count": 0}
     try:

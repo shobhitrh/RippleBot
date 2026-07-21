@@ -14,45 +14,61 @@ class DocumentHandler(FileSystemEventHandler):
         self.debounce_seconds = debounce_seconds
         self.timer = None
         self.lock = threading.Lock()
-    def trigger_indexing(self):
+        self._pending_companies = set()  # tenants with changes awaiting index
+
+    def _company_from_path(self, path: str) -> str:
+        """Infer the tenant from the path: <knowledge_base>/<company_id>/<file>."""
+        try:
+            rel = os.path.relpath(path, config.DOCUMENTS_DIR)
+            first = rel.replace("\\", "/").split("/")[0]
+            if first and first not in (".", "..", "db"):
+                return config.normalize_company_id(first)
+        except Exception:
+            pass
+        return config.DEFAULT_COMPANY_ID
+
+    def trigger_indexing(self, company_id: str):
         with self.lock:
+            self._pending_companies.add(company_id)
             if self.timer:
                 self.timer.cancel()
             self.timer = threading.Timer(self.debounce_seconds, self._run_indexing)
             self.timer.start()
-            
+
     def _run_indexing(self):
-        logger.info("Watcher: Change quiet period reached. Starting incremental index...")
-        try:
-            engine = get_engine(required=False)
-            if engine is None:
-                logger.warning("Watcher: vector store unavailable — skipping index build.")
-                return
-            success = engine.build_index(force_rebuild=False)
-            if success:
-                logger.info("Watcher: Indexing complete.")
-            else:
-                logger.warning("Watcher: Indexing finished with warnings/no operations.")
-        except Exception as e:
-            logger.error(f"Watcher: Error building index: {e}")
+        with self.lock:
+            companies = list(self._pending_companies)
+            self._pending_companies.clear()
+        logger.info(f"Watcher: quiet period reached. Indexing tenants: {companies}")
+        for cid in companies:
+            try:
+                engine = get_engine(cid, required=False)
+                if engine is None:
+                    logger.warning(f"Watcher: vector store unavailable — skipping tenant '{cid}'.")
+                    continue
+                if engine.build_index(force_rebuild=False):
+                    logger.info(f"Watcher: Indexing complete for tenant '{cid}'.")
+            except Exception as e:
+                logger.error(f"Watcher: Error building index for tenant '{cid}': {e}")
 
     def on_any_event(self, event):
         if event.is_directory:
             return
-            
+
         path = event.src_path
         filename = os.path.basename(path)
-        
+
         # Ignore hidden, temporary and metadata files
         if filename.startswith(".") or filename.startswith("~$") or filename.endswith(".metadata.json"):
             return
-            
+
         supported_extensions = {'.xlsx', '.xls', '.pdf', '.md', '.txt', '.docx', '.csv', '.tsv'}
         _, ext = os.path.splitext(filename)
-        
+
         if ext.lower() in supported_extensions:
-            logger.info(f"Watcher: Detected event '{event.event_type}' on file: {path}")
-            self.trigger_indexing()
+            company_id = self._company_from_path(path)
+            logger.info(f"Watcher: Detected '{event.event_type}' on {path} (tenant={company_id})")
+            self.trigger_indexing(company_id)
 
 
 _observer = None

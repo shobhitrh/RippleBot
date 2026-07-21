@@ -1,0 +1,3 @@
+# Root requirements so Railway/Nixpacks detects a Python app and installs the
+# backend dependencies. The backend is served from repo root as backend.src.main:app.
+-r backend/requirements.txt

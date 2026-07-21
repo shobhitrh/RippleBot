@@ -6,7 +6,7 @@ import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
 from pydantic import BaseModel
-from fastapi import APIRouter
+from fastapi import APIRouter, Header
 from fastapi.responses import StreamingResponse
 from fastapi.concurrency import run_in_threadpool
 from backend.src import config
@@ -36,14 +36,14 @@ class QueryPayload(BaseModel):
     query: str
     filters: Optional[QueryFilters] = None
 
-async def route_and_execute(query_text: str) -> Optional[dict]:
+async def route_and_execute(query_text: str, company_id: str = None) -> Optional[dict]:
     """
     Query-Time Router: Classify query dynamically using LLM.
     If it requires SQL (count, average, sum, min, max, global filters),
-    it generates the exact SQLite query, runs it against Tier C, and
-    formats the results to bypass semantic vector search and guarantee no data loss.
+    it generates the exact SQLite query, runs it against this tenant's Tier C DB,
+    and formats the results to bypass semantic search and guarantee no data loss.
     """
-    db_path = get_db_path()
+    db_path = get_db_path(company_id)
     if not os.path.exists(db_path):
         return None
         
@@ -244,12 +244,16 @@ JSON Output:"""
     return None
 
 @router.post("/query")
-async def chat_query(payload: QueryPayload):
+async def chat_query(
+    payload: QueryPayload,
+    company_id: str = Header(default=config.DEFAULT_COMPANY_ID, alias="X-Company-Id"),
+):
     """
     Retrieve relevant chunks from the configured vector store (backend-agnostic:
-    ChromaDB or pgvector), then stream an onboarding-assistant answer with sources.
-    Degrades gracefully — never 500s — when the store is offline or empty.
+    ChromaDB or pgvector), scoped to the requesting company, then stream an
+    onboarding-assistant answer. Degrades gracefully — never 500s.
     """
+    company_id = config.normalize_company_id(company_id)
     query_text = (payload.query or "").strip()
     if not query_text:
         return StreamingResponse(
@@ -284,7 +288,7 @@ async def chat_query(payload: QueryPayload):
     sql_result = None
     if not is_conversational:
         try:
-            sql_result = await route_and_execute(query_text)
+            sql_result = await route_and_execute(query_text, company_id)
         except Exception as e:
             logger.error(f"Error in SQL query routing: {e}")
 
@@ -375,7 +379,7 @@ Answer:"""
     engine = None
     if not is_conversational:
         # Get the shared engine; degrade cleanly if the vector store is offline.
-        engine = get_engine(required=False)
+        engine = get_engine(company_id, required=False)
         if engine is not None:
             # Retrieve + rerank (embedding-based dense search)
             try:

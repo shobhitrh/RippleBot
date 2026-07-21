@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Search, Circle } from "lucide-react";
 import { apiFetch, useBackoffPoll } from "@/lib/api";
+import { CompanySelector } from "@/components/company-selector";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
@@ -84,6 +85,7 @@ export function AppHeader() {
       </button>
 
       <div className="ml-auto flex items-center gap-2">
+        <CompanySelector />
         <StatusPill label="API" status={backendStatus} text={backendStatus === "active" ? "Online" : backendStatus === "error" ? "Offline" : "..."} />
         <StatusPill label="Vector DB" status={vectorStatus} text={vectorStatus === "active" ? "Active" : vectorStatus === "error" ? "Error" : "..."} />
         <Button variant="ghost" size="sm">

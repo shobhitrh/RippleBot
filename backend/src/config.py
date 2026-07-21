@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -70,7 +71,32 @@ GROQ_API_KEY = GROQ_API_KEYS[0] if GROQ_API_KEYS else None
 # Final fallback LLM after all Groq keys fail.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") if _valid_key(os.getenv("GEMINI_API_KEY")) else None
 
+# ---------------- MULTI-TENANCY ----------------
+# Every request is scoped to a company (tenant) via the "X-Company-Id" header.
+# Requests without one fall back to DEFAULT_COMPANY_ID so single-tenant / local
+# use keeps working unchanged.
+DEFAULT_COMPANY_ID = os.getenv("DEFAULT_COMPANY_ID", "default")
+
+
+def normalize_company_id(company_id: str) -> str:
+    """
+    Sanitize a tenant id into a safe slug usable in file paths, Chroma collection
+    names, and SQL values: lowercase, alnum + underscore/hyphen only.
+    """
+    cid = (company_id or "").strip().lower()
+    cid = re.sub(r"[^a-z0-9_-]+", "_", cid).strip("_-")
+    return cid or DEFAULT_COMPANY_ID
+
+
+def company_documents_dir(company_id: str) -> str:
+    """Per-tenant upload directory: <knowledge_base>/<company_id>/."""
+    path = os.path.join(DOCUMENTS_DIR, normalize_company_id(company_id))
+    Path(path).mkdir(parents=True, exist_ok=True)
+    return path
+
+
 # Server Config
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")
+# Comma-separated allowed origins. On Railway set CORS_ORIGINS to your frontend URL.
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]

@@ -31,11 +31,13 @@ import {
   updateMessage,
   updateThreadTitle,
   useThreads,
+  threadsForCompany,
   type ChatMessage,
 } from "@/lib/chat-store";
 import { promptChips } from "@/lib/mock-data";
 import { SourceDrawer } from "@/components/source-drawer";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, companyHeaders } from "@/lib/api";
+import { useCompany } from "@/lib/company";
 
 export const Route = createFileRoute("/chat/$threadId")({
   component: ChatThreadView,
@@ -49,8 +51,11 @@ const SIDEBAR_DEFAULT = 260;
 function ChatThreadView() {
   const { threadId } = Route.useParams();
   const navigate = useNavigate();
-  const threads = useThreads();
-  const thread = threads.find((t) => t.id === threadId);
+  const allThreads = useThreads();
+  const [selectedCompany] = useCompany();
+  // Only show conversations belonging to the selected tenant.
+  const threads = threadsForCompany(allThreads, selectedCompany);
+  const thread = allThreads.find((t) => t.id === threadId);
 
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
@@ -65,6 +70,14 @@ function ChatThreadView() {
 
   const messages = thread?.messages ?? [];
   const lastLen = messages[messages.length - 1]?.content.length ?? 0;
+
+  // When the tenant switches, leave a conversation that belongs to another one.
+  useEffect(() => {
+    if (thread && (thread.companyId ?? selectedCompany) !== selectedCompany) {
+      navigate({ to: "/chat" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCompany]);
 
   // Keep the conversation pinned to the latest output. Fires on new messages,
   // the thinking indicator, and while tokens stream into the last message.
@@ -144,7 +157,7 @@ function ChatThreadView() {
     try {
       const response = await fetch(apiUrl("/api/chat/query"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...companyHeaders() },
         body: JSON.stringify({ query: text.trim(), filters: {} }),
       });
 

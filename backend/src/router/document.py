@@ -5,12 +5,16 @@ import logging
 import json
 from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Header
 from backend.src import config
 from backend.src.rag_engine import get_engine
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+# Tenant header shared by all document endpoints.
+CompanyId = Header(default=config.DEFAULT_COMPANY_ID, alias="X-Company-Id")
+
 
 @router.post("/upload")
 async def upload_document(
@@ -18,18 +22,21 @@ async def upload_document(
     file: UploadFile = File(...),
     department: Optional[str] = Form(None),
     uploaded_by: Optional[str] = Form(None),
-    category: Optional[str] = Form(None)
+    category: Optional[str] = Form(None),
+    company_id: str = CompanyId,
 ):
     """
-    Accept multipart/form-data upload, save the file to knowledge_base,
-    and attach metadata via frontmatter (text) or sidecar JSON (binary).
+    Accept multipart/form-data upload, save it to the company's knowledge_base
+    subfolder, and attach metadata via frontmatter (text) or sidecar JSON (binary).
     """
+    company_id = config.normalize_company_id(company_id)
+    docs_dir = config.company_documents_dir(company_id)
     filename = file.filename
     # Sanitize filename
     safe_filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
     safe_filename = re.sub(r'\s+', '_', safe_filename).strip("_")
-    
-    file_path = os.path.join(config.DOCUMENTS_DIR, safe_filename)
+
+    file_path = os.path.join(docs_dir, safe_filename)
     
     # Save the file
     try:
@@ -92,11 +99,11 @@ uploaded_at: {metadata['uploaded_at']}
     # to guarantee fast feedback loop
     def run_indexer():
         try:
-            engine = get_engine(required=False)
+            engine = get_engine(company_id, required=False)
             if engine is None:
                 logger.warning("Skipping index build — vector store is unavailable.")
                 return
-            logger.info(f"Triggering direct index from upload for: {safe_filename}")
+            logger.info(f"Triggering direct index from upload for: {safe_filename} (tenant={company_id})")
             engine.build_index(force_rebuild=False)
         except Exception as e:
             logger.error(f"Manual index build trigger failed: {e}")
@@ -111,25 +118,26 @@ uploaded_at: {metadata['uploaded_at']}
     }
 
 @router.get("")
-async def list_documents():
+async def list_documents(company_id: str = CompanyId):
     """
-    List all files present in ./backend/knowledge_base/
-    with their index status and vector counts from the database.
+    List this company's files with their index status and vector counts.
     """
-    if not os.path.exists(config.DOCUMENTS_DIR):
+    company_id = config.normalize_company_id(company_id)
+    docs_dir = config.company_documents_dir(company_id)
+    if not os.path.exists(docs_dir):
         return []
-        
+
     # Get all files in directory, ignoring sidecar metadata and hidden files
     all_files = []
-    for f in os.listdir(config.DOCUMENTS_DIR):
-        full_path = os.path.join(config.DOCUMENTS_DIR, f)
+    for f in os.listdir(docs_dir):
+        full_path = os.path.join(docs_dir, f)
         if os.path.isfile(full_path) and not f.startswith(".") and not f.startswith("~$") and not f.endswith(".metadata.json"):
             all_files.append(f)
-            
+
     # Fetch index status from the vector store (backend-agnostic). If the store
     # is offline we simply show the physical files with a "pending" status.
     db_docs = {}
-    engine = get_engine(required=False)
+    engine = get_engine(company_id, required=False)
     if engine is not None:
         try:
             db_docs = engine.list_indexed_documents()
@@ -138,7 +146,7 @@ async def list_documents():
 
     result = []
     for filename in all_files:
-        full_path = os.path.join(config.DOCUMENTS_DIR, filename)
+        full_path = os.path.join(docs_dir, filename)
         stat = os.stat(full_path)
         
         # Merge physical files with database record if it exists
@@ -163,14 +171,15 @@ async def list_documents():
     return result
 
 @router.delete("/{filename}")
-async def delete_document(filename: str):
+async def delete_document(filename: str, company_id: str = CompanyId):
     """
-    Remove physical file and metadata sidecars,
-    and drop document records and vectors from PostgreSQL.
+    Remove this company's physical file + sidecar and drop its vectors/records.
     """
+    company_id = config.normalize_company_id(company_id)
+    docs_dir = config.company_documents_dir(company_id)
     # Sanitize filename to prevent directory traversal
     safe_filename = os.path.basename(filename)
-    file_path = os.path.join(config.DOCUMENTS_DIR, safe_filename)
+    file_path = os.path.join(docs_dir, safe_filename)
     sidecar_path = file_path + ".metadata.json"
     
     file_exists = os.path.exists(file_path)
@@ -191,7 +200,7 @@ async def delete_document(filename: str):
 
     # Delete vectors/records from the store (best-effort; a down store shouldn't
     # block removing the physical file).
-    engine = get_engine(required=False)
+    engine = get_engine(company_id, required=False)
     if engine is not None:
         try:
             removed = engine.delete_document(safe_filename)
@@ -206,11 +215,12 @@ async def delete_document(filename: str):
     return {"status": "success", "message": f"Document '{safe_filename}' and all its embeddings deleted successfully."}
 
 @router.get("/{filename}/preview")
-async def get_document_preview(filename: str):
+async def get_document_preview(filename: str, company_id: str = CompanyId):
     """Read the first few kilobytes of the file and return it as preview text."""
+    company_id = config.normalize_company_id(company_id)
     safe_filename = os.path.basename(filename)
-    file_path = os.path.join(config.DOCUMENTS_DIR, safe_filename)
-    
+    file_path = os.path.join(config.company_documents_dir(company_id), safe_filename)
+
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
         
@@ -305,11 +315,12 @@ async def get_document_preview(filename: str):
         return {"preview": f"Error loading preview: {str(e)}"}
 
 @router.get("/{filename}/download")
-async def download_document(filename: str):
-    """Download the raw file from knowledge_base."""
+async def download_document(filename: str, company_id: str = CompanyId):
+    """Download the raw file from the company's knowledge_base."""
     from fastapi.responses import FileResponse
+    company_id = config.normalize_company_id(company_id)
     safe_filename = os.path.basename(filename)
-    file_path = os.path.join(config.DOCUMENTS_DIR, safe_filename)
+    file_path = os.path.join(config.company_documents_dir(company_id), safe_filename)
     
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")

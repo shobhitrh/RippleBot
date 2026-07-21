@@ -21,7 +21,13 @@ export function CompanySelector() {
   const onChange = (value: string) => {
     if (value === ADD_NEW) {
       const name = window.prompt("New company name:");
-      if (name && name.trim()) addCompany(name.trim());
+      if (!name || !name.trim()) return;
+      // Optional email domain → enables Fireflies auto-routing for this company.
+      const domain = window.prompt(
+        `Email domain for "${name.trim()}" (optional, e.g. acme.com)\nUsed to auto-route Fireflies meetings to this company.`,
+        ""
+      );
+      addCompany(name.trim(), (domain || "").trim() || undefined);
       return;
     }
     setSelectedCompany(value);

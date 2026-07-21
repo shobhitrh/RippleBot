@@ -8,7 +8,7 @@ from typing import Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Header, Query
 from fastapi.concurrency import run_in_threadpool
-from backend.src import config
+from backend.src import config, companies
 from backend.src.rag_engine import get_engine
 
 logger = logging.getLogger(__name__)
@@ -201,16 +201,37 @@ def _already_indexed(docs_dir: str, meeting_id: str) -> bool:
     return False
 
 
-async def process_meeting(company_id: str, meeting_id: str):
-    """Fetch → build markdown → save to the company's KB → index (Voyage embeddings)."""
-    logger.info(f"Fireflies: processing meeting {meeting_id} for tenant '{company_id}'")
+def _attendee_emails(t: dict) -> list:
+    """All emails on a transcript — for domain-based company routing."""
+    emails = list(t.get("participants") or [])
+    if t.get("organizer_email"):
+        emails.append(t["organizer_email"])
+    for a in (t.get("meeting_attendees") or []):
+        if a.get("email"):
+            emails.append(a["email"])
+    return emails
+
+
+async def process_meeting(meeting_id: str, company_id: str = None):
+    """
+    Fetch → (resolve tenant by attendee email domain if not given) → build markdown
+    → save to that company's KB → index (Voyage embeddings). Unmatched meetings go
+    to the 'unassigned' quarantine tenant so nothing lands in the wrong company.
+    """
     try:
+        transcript = await fetch_transcript(meeting_id)
+
+        if not company_id:
+            company_id = companies.resolve_company_from_emails(_attendee_emails(transcript))
+            logger.info(f"Fireflies: routed meeting {meeting_id} → tenant '{company_id}' by email domain")
+        else:
+            company_id = config.normalize_company_id(company_id)
+
         docs_dir = config.company_documents_dir(company_id)
         if _already_indexed(docs_dir, meeting_id):
             logger.info(f"Fireflies: meeting {meeting_id} already present for '{company_id}' — skipping.")
             return
 
-        transcript = await fetch_transcript(meeting_id)
         stub, date_str, markdown = build_meeting_markdown(transcript)
 
         filename = f"FF_{stub}_{date_str}.md"
@@ -236,6 +257,12 @@ def _check_token(token: Optional[str], header_token: Optional[str]):
         raise HTTPException(status_code=401, detail="Invalid or missing webhook token")
 
 
+def _is_ignorable(event_type: Optional[str]) -> bool:
+    """Only act on completed transcripts; ignore other Fireflies event types."""
+    e = (event_type or "").lower()
+    return bool(e) and "transcription" in e and "complet" not in e
+
+
 @router.post("/fireflies/{company_id}")
 async def fireflies_webhook(
     company_id: str,
@@ -251,24 +278,28 @@ async def fireflies_webhook(
     """
     _check_token(token, x_webhook_token)
     company_id = config.normalize_company_id(company_id)
-    event = (payload.eventType or "").lower()
-    # Only act on completed transcripts (ignore other event types quietly).
-    if event and "transcription" in event and "complet" not in event:
+    if _is_ignorable(payload.eventType):
         return {"status": "ignored", "eventType": payload.eventType}
-
-    logger.info(f"Fireflies webhook: tenant='{company_id}' meetingId={payload.meetingId} event={payload.eventType}")
-    background_tasks.add_task(process_meeting, company_id, payload.meetingId)
+    logger.info(f"Fireflies webhook (explicit tenant='{company_id}'): meetingId={payload.meetingId}")
+    background_tasks.add_task(process_meeting, payload.meetingId, company_id)
     return {"status": "processing", "company_id": company_id, "meeting_id": payload.meetingId}
 
 
-# Backward-compatible route (no tenant) → default company.
 @router.post("/fireflies")
-async def fireflies_webhook_default(
+async def fireflies_webhook_autoroute(
     payload: WebhookPayload,
     background_tasks: BackgroundTasks,
     token: Optional[str] = Query(default=None),
     x_webhook_token: Optional[str] = Header(default=None),
 ):
+    """
+    Single webhook for one Fireflies account serving many companies. The tenant is
+    resolved from attendee email domains (see companies registry); unmatched
+    meetings go to the 'unassigned' quarantine tenant for manual assignment.
+    """
     _check_token(token, x_webhook_token)
-    background_tasks.add_task(process_meeting, config.DEFAULT_COMPANY_ID, payload.meetingId)
-    return {"status": "processing", "company_id": config.DEFAULT_COMPANY_ID, "meeting_id": payload.meetingId}
+    if _is_ignorable(payload.eventType):
+        return {"status": "ignored", "eventType": payload.eventType}
+    logger.info(f"Fireflies webhook (auto-route): meetingId={payload.meetingId}")
+    background_tasks.add_task(process_meeting, payload.meetingId, None)
+    return {"status": "processing", "routing": "by-domain", "meeting_id": payload.meetingId}

@@ -5,7 +5,7 @@ from fastapi import FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
 from backend.src import config
 from backend.src.watcher import start_watcher, stop_watcher
-from backend.src.router import webhook, document, chat
+from backend.src.router import webhook, document, chat, company
 
 # Set up logging configuration
 logging.basicConfig(
@@ -110,6 +110,7 @@ app.add_middleware(
 app.include_router(webhook.router, prefix="/api")
 app.include_router(document.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
+app.include_router(company.router, prefix="/api")
 
 @app.get("/")
 async def root():

@@ -73,3 +73,7 @@ scratch_backend.log
 .antigravity-ide/
 .claude/
 .lovable/
+
+# Runtime tenant registry (persisted via Railway volume, seeded in code)
+backend/knowledge_base/companies.json
+knowledge_base/companies.json

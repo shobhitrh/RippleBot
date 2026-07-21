@@ -214,6 +214,54 @@ async def delete_document(filename: str, company_id: str = CompanyId):
         
     return {"status": "success", "message": f"Document '{safe_filename}' and all its embeddings deleted successfully."}
 
+@router.post("/{filename}/assign")
+async def assign_document(filename: str, target_company_id: str = Form(...), company_id: str = CompanyId):
+    """
+    Move a document (e.g. an 'unassigned' Fireflies meeting) from the source tenant
+    to the target company: relocate the file + sidecar, drop it from the source
+    index, and re-index it under the target. Fixes/rescues mis-routed meetings.
+    """
+    src = config.normalize_company_id(company_id)
+    dst = config.normalize_company_id(target_company_id)
+    if src == dst:
+        return {"status": "noop", "message": "Source and target company are the same."}
+
+    safe = os.path.basename(filename)
+    src_dir = config.company_documents_dir(src)
+    dst_dir = config.company_documents_dir(dst)
+    src_file = os.path.join(src_dir, safe)
+    if not os.path.exists(src_file):
+        raise HTTPException(status_code=404, detail="File not found in source company")
+
+    # Move file + sidecar to the target tenant's folder.
+    try:
+        shutil.move(src_file, os.path.join(dst_dir, safe))
+        sidecar = src_file + ".metadata.json"
+        if os.path.exists(sidecar):
+            shutil.move(sidecar, os.path.join(dst_dir, safe + ".metadata.json"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not move file: {e}")
+
+    # Drop from source index, then index under the target.
+    src_engine = get_engine(src, required=False)
+    if src_engine is not None:
+        try:
+            src_engine.delete_document(safe)
+        except Exception as e:
+            logger.error(f"assign: failed to de-index from source '{src}': {e}")
+
+    def reindex_target():
+        try:
+            eng = get_engine(dst, required=False)
+            if eng is not None:
+                eng.build_index(force_rebuild=False)
+        except Exception:
+            logger.error(f"assign: reindex failed for target '{dst}'", exc_info=True)
+    reindex_target()
+
+    return {"status": "success", "message": f"Moved '{safe}' from {src} to {dst}", "company_id": dst}
+
+
 @router.get("/{filename}/preview")
 async def get_document_preview(filename: str, company_id: str = CompanyId):
     """Read the first few kilobytes of the file and return it as preview text."""

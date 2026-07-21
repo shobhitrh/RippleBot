@@ -592,47 +592,42 @@ def process_file(file_info: Dict, company_id: str = None) -> List[Dict]:
         processor = processors.get(file_type)
         if processor:
             chunks = processor(file_path)
-        
-        # Load metadata from sidecar or frontmatter
-        metadata_from_file = {}
-        
-        # Check sidecar metadata first
-        sidecar_path = file_path + ".metadata.json"
-        if os.path.exists(sidecar_path):
-            try:
-                with open(sidecar_path, 'r', encoding='utf-8') as sf:
-                    metadata_from_file = json.load(sf)
-                logger.info(f"Loaded sidecar metadata for {file_info['name']}")
-            except Exception as e:
-                logger.error(f"Error reading sidecar metadata {sidecar_path}: {e}")
-                
-        # Check frontmatter if markdown or text
-        elif file_type in ['.md', '.txt']:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                match = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
-                if match:
-                    import yaml
-                    frontmatter_text = match.group(1)
-                    metadata_from_file = yaml.safe_load(frontmatter_text) or {}
-                    logger.info(f"Loaded frontmatter metadata for {file_info['name']}")
-            except Exception as e:
-                logger.warning(f"Error reading frontmatter for {file_path}: {e}")
-                
-        for chunk in chunks:
-            chunk['metadata']['file_hash'] = file_hash
-            chunk['metadata']['relative_path'] = file_info.get('relative_path', '')
-            
-            # Merge loaded metadata (if not already set in parsing)
-            for k, v in metadata_from_file.items():
-                if k not in chunk['metadata']:
-                    chunk['metadata'][k] = v
-                    
-        return chunks
-    else:
-        logger.warning(f"Unsupported file type: {file_type}")
-        return []
+        else:
+            logger.warning(f"Unsupported file type: {file_type}")
+            return []
+
+    # Load tag metadata from a sidecar JSON (binary files incl. xlsx/csv) or YAML
+    # frontmatter (.md/.txt), then merge into every chunk — applies to all types.
+    metadata_from_file = {}
+    sidecar_path = file_path + ".metadata.json"
+    if os.path.exists(sidecar_path):
+        try:
+            with open(sidecar_path, 'r', encoding='utf-8') as sf:
+                metadata_from_file = json.load(sf)
+            logger.info(f"Loaded sidecar metadata for {file_info['name']}")
+        except Exception as e:
+            logger.error(f"Error reading sidecar metadata {sidecar_path}: {e}")
+    elif file_type in ['.md', '.txt']:
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            match = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
+            if match:
+                import yaml
+                frontmatter_text = match.group(1)
+                metadata_from_file = yaml.safe_load(frontmatter_text) or {}
+                logger.info(f"Loaded frontmatter metadata for {file_info['name']}")
+        except Exception as e:
+            logger.warning(f"Error reading frontmatter for {file_path}: {e}")
+
+    for chunk in chunks:
+        chunk['metadata']['file_hash'] = file_hash
+        chunk['metadata']['relative_path'] = file_info.get('relative_path', '')
+        for k, v in metadata_from_file.items():
+            if k not in chunk['metadata']:
+                chunk['metadata'][k] = v
+
+    return chunks
 
 # ---------------- RAG ENGINE CLASS ----------------
 class RAGEngine:

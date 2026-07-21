@@ -8,6 +8,14 @@ import { Calendar, Clock, Users, RefreshCw, FileText } from "lucide-react";
 import { mockMeetings, type Meeting } from "@/lib/mock-data";
 import { SourceDrawer } from "@/components/source-drawer";
 import { apiFetch, useBackoffPoll } from "@/lib/api";
+import { useCompany } from "@/lib/company";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export const Route = createFileRoute("/meetings")({
   component: MeetingsPage,
@@ -16,6 +24,30 @@ export const Route = createFileRoute("/meetings")({
 function MeetingsPage() {
   const [preview, setPreview] = useState<string | null>(null);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [selectedCompany, companies] = useCompany();
+
+  const assign = async (filename: string, target: string) => {
+    toast.info(`Assigning meeting to ${target}…`);
+    try {
+      const fd = new FormData();
+      fd.append("target_company_id", target);
+      // apiFetch attaches X-Company-Id (the source tenant) automatically.
+      const res = await apiFetch(`/api/documents/${encodeURIComponent(filename)}/assign`, {
+        method: "POST",
+        body: fd,
+        timeoutMs: 60000,
+      });
+      if (res.ok) {
+        toast.success(`Meeting assigned to ${target}`);
+        setMeetings((cur) => cur.filter((m) => m.markdownFile !== filename)); // optimistic
+        await fetchMeetings();
+      } else {
+        toast.error("Assign failed");
+      }
+    } catch {
+      toast.error("Backend connection failed");
+    }
+  };
 
   const fetchMeetings = async () => {
     try {
@@ -132,6 +164,20 @@ function MeetingsPage() {
                   <RefreshCw className="h-3.5 w-3.5" />
                   Re-summarize
                 </Button>
+                <Select value="" onValueChange={(v) => v && assign(m.markdownFile, v)}>
+                  <SelectTrigger className="h-8 w-full sm:w-[150px] text-xs" aria-label="Assign to company">
+                    <SelectValue placeholder={selectedCompany === "unassigned" ? "Assign to…" : "Move to…"} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {companies
+                      .filter((c) => c.id !== selectedCompany)
+                      .map((c) => (
+                        <SelectItem key={c.id} value={c.id} className="text-xs">
+                          {c.name}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
               </div>
             </CardContent>
           </Card>

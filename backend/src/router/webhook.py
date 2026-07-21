@@ -6,7 +6,7 @@ import httpx
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Header, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Header, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from backend.src import config, companies
 from backend.src.rag_engine import get_engine
@@ -251,20 +251,46 @@ async def process_meeting(meeting_id: str, company_id: str = None):
         logger.error(f"Fireflies: processing failed for meeting {meeting_id}", exc_info=True)
 
 
-def _check_token(token: Optional[str], header_token: Optional[str]):
+async def _verify(request: "Request", token: Optional[str], header_token: Optional[str]):
+    """
+    Authenticate the webhook. Accepts EITHER:
+      • the shared secret as ?token= / X-Webhook-Token, OR
+      • Fireflies' HMAC-SHA256 signature (the "Signing Secret" field) sent in
+        x-hub-signature / x-hub-signature-256, computed over the raw body.
+    Both use FIREFLIES_WEBHOOK_SECRET. If no secret is configured, allow (open).
+    """
+    import hmac, hashlib
     secret = config.FIREFLIES_WEBHOOK_SECRET
-    if secret and token != secret and header_token != secret:
-        raise HTTPException(status_code=401, detail="Invalid or missing webhook token")
+    if not secret:
+        return
+    if token == secret or header_token == secret:
+        return
+    # HMAC signature path
+    sig = (
+        request.headers.get("x-hub-signature-256")
+        or request.headers.get("x-hub-signature")
+        or request.headers.get("x-fireflies-signature")
+        or ""
+    ).split("=")[-1].strip()
+    if sig:
+        raw = await request.body()
+        expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+        if hmac.compare_digest(expected, sig):
+            return
+    raise HTTPException(status_code=401, detail="Webhook authentication failed")
 
 
-def _is_ignorable(event_type: Optional[str]) -> bool:
-    """Only act on completed transcripts; ignore other Fireflies event types."""
+def _should_process(event_type: Optional[str]) -> bool:
+    """Process transcription/summary-ready events; ignore others (e.g. bot joined)."""
     e = (event_type or "").lower()
-    return bool(e) and "transcription" in e and "complet" not in e
+    if not e:
+        return True  # manual test posts without an eventType
+    return "transcri" in e or "summ" in e
 
 
 @router.post("/fireflies/{company_id}")
 async def fireflies_webhook(
+    request: Request,
     company_id: str,
     payload: WebhookPayload,
     background_tasks: BackgroundTasks,
@@ -272,13 +298,11 @@ async def fireflies_webhook(
     x_webhook_token: Optional[str] = Header(default=None),
 ):
     """
-    Fireflies webhook, scoped to a company. Configure in Fireflies as:
-    https://<api>/api/webhooks/fireflies/<company_id>?token=<FIREFLIES_WEBHOOK_SECRET>
-    Responds 200 immediately and processes the transcript in the background.
+    Fireflies webhook scoped to an explicit company (override of domain routing).
     """
-    _check_token(token, x_webhook_token)
+    await _verify(request, token, x_webhook_token)
     company_id = config.normalize_company_id(company_id)
-    if _is_ignorable(payload.eventType):
+    if not _should_process(payload.eventType):
         return {"status": "ignored", "eventType": payload.eventType}
     logger.info(f"Fireflies webhook (explicit tenant='{company_id}'): meetingId={payload.meetingId}")
     background_tasks.add_task(process_meeting, payload.meetingId, company_id)
@@ -287,6 +311,7 @@ async def fireflies_webhook(
 
 @router.post("/fireflies")
 async def fireflies_webhook_autoroute(
+    request: Request,
     payload: WebhookPayload,
     background_tasks: BackgroundTasks,
     token: Optional[str] = Query(default=None),
@@ -297,8 +322,8 @@ async def fireflies_webhook_autoroute(
     resolved from attendee email domains (see companies registry); unmatched
     meetings go to the 'unassigned' quarantine tenant for manual assignment.
     """
-    _check_token(token, x_webhook_token)
-    if _is_ignorable(payload.eventType):
+    await _verify(request, token, x_webhook_token)
+    if not _should_process(payload.eventType):
         return {"status": "ignored", "eventType": payload.eventType}
     logger.info(f"Fireflies webhook (auto-route): meetingId={payload.meetingId}")
     background_tasks.add_task(process_meeting, payload.meetingId, None)

@@ -643,9 +643,34 @@ class RAGEngine:
         self.documents_dir = documents_dir or os.getenv("DOCUMENTS_DIR") or "documents"
         self.voyage_client = self._get_voyage_client()
         self.embed_dim = self._detect_embedding_dim()
-        self.conn = None
+        # psycopg2 connections are NOT safe to share across threads. This server
+        # touches the DB from several threads at once (event loop, the folder
+        # watcher's timer threads, and chat's threadpool). A single shared
+        # connection corrupts under that concurrency ("invalid error value
+        # specified"). Give each thread its own connection via thread-local storage.
+        self._local = threading.local()
         self._index_lock = threading.Lock()
         self._init_db()
+
+    @property
+    def conn(self):
+        """Return this thread's own PostgreSQL connection (created on first use)."""
+        c = getattr(self._local, "conn", None)
+        if c is not None and not getattr(c, "closed", 1):
+            return c
+        c = psycopg2.connect(self.connection_uri)
+        c.autocommit = True
+        self._local.conn = c
+        return c
+
+    def _close_thread_conn(self):
+        c = getattr(self._local, "conn", None)
+        if c is not None:
+            try:
+                c.close()
+            except Exception:
+                pass
+            self._local.conn = None
 
     def _detect_embedding_dim(self) -> int:
         """
@@ -664,24 +689,18 @@ class RAGEngine:
             return 1024
 
     def is_connected(self) -> bool:
-        """Cheaply check whether the underlying connection is still alive."""
-        if self.conn is None or getattr(self.conn, "closed", 1):
-            return False
+        """Cheaply check whether this thread's connection is alive."""
         try:
             with self.conn.cursor() as cur:
                 cur.execute("SELECT 1")
             return True
         except Exception:
+            self._close_thread_conn()
             return False
 
     def reconnect(self):
-        """Re-establish the PostgreSQL connection and re-run schema migrations."""
-        try:
-            if self.conn is not None and not getattr(self.conn, "closed", 1):
-                self.conn.close()
-        except Exception:
-            pass
-        self.conn = None
+        """Drop this thread's connection and re-run schema migrations."""
+        self._close_thread_conn()
         self._init_db()
 
     def _get_voyage_client(self) -> voyageai.Client:
@@ -692,10 +711,8 @@ class RAGEngine:
         return voyageai.Client(api_key=key)
     
     def _init_db(self):
-        """Initialize PostgreSQL connection and run schema migrations."""
+        """Run schema migrations on this thread's connection."""
         try:
-            self.conn = psycopg2.connect(self.connection_uri)
-            self.conn.autocommit = True
             cursor = self.conn.cursor()
             
             # Enable pgvector extension
@@ -807,6 +824,15 @@ class RAGEngine:
         return all_embeddings
     
     def build_index(self, force_rebuild: bool = False) -> bool:
+        """Serialize concurrent builds (the watcher can fire overlapping runs) and
+        release this (often short-lived watcher) thread's connection afterwards."""
+        with self._index_lock:
+            try:
+                return self._build_index_locked(force_rebuild)
+            finally:
+                self._close_thread_conn()
+
+    def _build_index_locked(self, force_rebuild: bool = False) -> bool:
         """Build or update the index incrementally using file hashes."""
         logger.info("=" * 60)
         logger.info("📂 Discovering documents...")

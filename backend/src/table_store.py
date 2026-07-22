@@ -214,18 +214,20 @@ def _pg_router_schema(company_id: Optional[str]) -> Dict[str, dict]:
             cols = []
             for col_name, col_type in cur.fetchall():
                 samples = []
-                try:
-                    cur.execute(
-                        f"SELECT DISTINCT {_qi(col_name)} FROM {_qi(schema)}.{_qi(t)} "
-                        f"WHERE {_qi(col_name)} IS NOT NULL LIMIT 25;"
-                    )
-                    for (v,) in cur.fetchall():
-                        s = str(v).strip()
-                        if s and len(s) < 60:
-                            samples.append(s)
-                except Exception:
-                    pass
-                cols.append({"name": col_name, "type": col_type, "samples": samples[:15]})
+                is_text = any(t_kw in str(col_type).lower() for t_kw in ("text", "char", "varchar", "string"))
+                if is_text:
+                    try:
+                        cur.execute(
+                            f"SELECT DISTINCT {_qi(col_name)} FROM {_qi(schema)}.{_qi(t)} "
+                            f"WHERE {_qi(col_name)} IS NOT NULL LIMIT 8;"
+                        )
+                        for (v,) in cur.fetchall():
+                            s = str(v).strip()
+                            if s and len(s) < 60:
+                                samples.append(s)
+                    except Exception:
+                        pass
+                cols.append({"name": col_name, "type": col_type, "samples": samples[:8]})
             out[t] = {"title": titles.get(t), "source_key": sources.get(t), "columns": cols}
     finally:
         conn.close()
@@ -324,16 +326,18 @@ def _sqlite_router_schema(company_id: Optional[str]) -> Dict[str, dict]:
             for c in cur.fetchall():
                 col_name, col_type = c[1], c[2]
                 samples = []
-                try:
-                    cur.execute(f'SELECT DISTINCT "{col_name}" FROM "{t}" WHERE "{col_name}" IS NOT NULL LIMIT 25')
-                    for (v,) in cur.fetchall():
-                        s = str(v).strip()
-                        if s and len(s) < 60:
-                            samples.append(s)
-                except Exception:
-                    pass
-                cols.append({"name": col_name, "type": col_type, "samples": samples[:15]})
-            # SQLite has no stored source_key; the router maps by table name.
+                # Only fetch samples for text/string columns
+                is_text = any(t_kw in str(col_type).lower() for t_kw in ("text", "char", "varchar", "string")) or col_type == ""
+                if is_text:
+                    try:
+                        cur.execute(f'SELECT DISTINCT "{col_name}" FROM "{t}" WHERE "{col_name}" IS NOT NULL LIMIT 8')
+                        for (v,) in cur.fetchall():
+                            s = str(v).strip()
+                            if s and len(s) < 60:
+                                samples.append(s)
+                    except Exception:
+                        pass
+                cols.append({"name": col_name, "type": col_type, "samples": samples[:8]})
             out[t] = {"title": titles.get(t), "source_key": t, "columns": cols}
         conn.close()
     except Exception as e:

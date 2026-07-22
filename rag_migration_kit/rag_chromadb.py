@@ -99,8 +99,15 @@ class QueryError(RAGError):
 
 # ---------------- FILE UTILITIES ----------------
 def get_file_hash(file_path: str) -> str:
-    """Generate MD5 hash for change detection."""
+    """Generate MD5 hash for change detection, salted by PARSER_VERSION for spreadsheets."""
     hasher = hashlib.md5()
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in ('.xlsx', '.xls', '.csv', '.tsv'):
+        try:
+            from backend.src.excel_parser import PARSER_VERSION
+            hasher.update(PARSER_VERSION.encode('utf-8'))
+        except Exception:
+            pass
     try:
         with open(file_path, 'rb') as f:
             for chunk in iter(lambda: f.read(4096), b""):

@@ -306,16 +306,34 @@ def detect_data_start_row(sheet_val, min_r, max_r, filtered_cols_indices, grid_v
             
     return 1
 
+PARSER_VERSION = "v3"
+
+def is_same_column_signature(cols_a: List[str], cols_b: List[str]) -> bool:
+    """Check if two column sets have >= 90% overlap or matching column count."""
+    if not cols_a or not cols_b:
+        return False
+    if len(cols_a) == len(cols_b):
+        # If same length, check match ratio
+        matches = sum(1 for a, b in zip(cols_a, cols_b) if a == b or a in cols_b)
+        return (matches / len(cols_a)) >= 0.8
+    set_a, set_b = set(cols_a), set(cols_b)
+    intersection = set_a.intersection(set_b)
+    union = set_a.union(set_b)
+    if not union:
+        return False
+    return (len(intersection) / len(union)) >= 0.9
+
 def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.DataFrame, str]]]:
     """
     Parse an Excel (.xlsx, .xls) workbook.
     Runs table segmentation to detect multiple side-by-side or stacked tables per sheet.
     Un-merges cells within specific bounds, flattens multi-row headers,
     captures style highlights (bold/red), and filters hidden columns/rows.
-    Generates Tier A & Tier B chunks and returns Tier C tables for SQLite.
+    Merges fragments with matching column signatures to avoid over-segmentation.
+    Generates Tier A & Tier B chunks and returns Tier C tables for SQLite/Postgres.
     """
     filename = os.path.basename(file_path)
-    logger.info(f"Ingesting Excel file: {filename}")
+    logger.info(f"Ingesting Excel file: {filename} (Parser {PARSER_VERSION})")
     
     chunks = []
     sqlite_tables = []
@@ -330,6 +348,9 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
         logger.error(f"Failed to load workbook for {filename}: {e}")
         return [], []
         
+    all_sheet_tables = []
+    leftover_chunks = []
+
     for sheet_name in wb_val.sheetnames:
         sheet_val = wb_val[sheet_name]
         if sheet_name not in wb_form.sheetnames:
@@ -353,7 +374,6 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
         # Forward-fill merged cells safely strictly within bounds
         for merged_range in sheet_val.merged_cells.ranges:
             min_col, min_row, max_col, max_row_range = merged_range.bounds
-            # Cap bounds in case they exceed the dimensions
             min_col = min(min_col, max_column)
             min_row = min(min_row, max_row)
             max_col = min(max_col, max_column)
@@ -367,7 +387,7 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                     grid_val[r-1][c-1] = top_left_val
                     grid_form[r-1][c-1] = top_left_form
                     
-        # 2. Detect title banner rows (only 1 cell populated in the raw unmerged sheet, but merged across columns)
+        # 2. Detect title banner rows
         banner_rows = set()
         if max_column > 2:
             for r in range(max_row):
@@ -376,8 +396,7 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                 if non_empty_raw == 1 and non_empty_grid > 1:
                     banner_rows.add(r)
 
-        # 3. Build occupancy grid and detect connected components (table segmentation)
-        # Exclude banner rows from occupancy grid so they don't bridge side-by-side tables
+        # 3. Build occupancy grid and detect connected components
         occupancy = []
         for r in range(max_row):
             if r in banner_rows:
@@ -392,15 +411,12 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
         for r in range(max_row):
             for c in range(max_column):
                 if occupancy[r][c] and (r, c) not in visited:
-                    # Flood-fill: tolerance of 3 rows vertically, adjacent only columns horizontally
                     queue = [(r, c)]
                     visited.add((r, c))
                     comp = []
                     while queue:
                         curr = queue.pop(0)
                         comp.append(curr)
-                        
-                        # Row gap tolerance up to 3, column gap tolerance 0 (only adjacent)
                         for dr in [-3, -2, -1, 0, 1, 2, 3]:
                             for dc in [-1, 0, 1]:
                                 if dr == 0 and dc == 0:
@@ -411,22 +427,17 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                                         visited.add((nr, nc))
                                         queue.append((nr, nc))
                     components.append(comp)
-                    
-        table_counter = 1
+
+        raw_sheet_tables = []
         for comp in components:
-            if len(comp) < 4:  # filter out noise / floating notes
+            if len(comp) < 4:
                 continue
                 
-            # Find bounds
             rows_in_comp = [cell[0] for cell in comp]
             cols_in_comp = [cell[1] for cell in comp]
             min_r, max_r = min(rows_in_comp), max(rows_in_comp)
             min_c, max_c = min(cols_in_comp), max(cols_in_comp)
             
-            table_id = f"table_{table_counter}"
-            table_counter += 1
-            
-            # Find title banners immediately above this table
             table_title_parts = []
             check_r = min_r - 1
             while check_r >= 0:
@@ -441,7 +452,6 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                     break
             table_title = " - ".join(table_title_parts) if table_title_parts else ""
             
-            # Hidden columns and rows filtering
             filtered_cols_indices = []
             for c_idx in range(min_c, max_c + 1):
                 col_letter = openpyxl.utils.get_column_letter(c_idx + 1)
@@ -452,7 +462,6 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
             if not filtered_cols_indices:
                 continue
 
-            # 4. Multi-row header detection and flattening
             data_start_row = detect_data_start_row(sheet_val, min_r, max_r, filtered_cols_indices, grid_val)
             
             header = []
@@ -467,7 +476,6 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                 else:
                     header.append(" ".join(col_header_parts))
                 
-            # Sanitize headers
             final_columns = []
             seen = {}
             for h in header:
@@ -481,60 +489,28 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                     seen[h_clean] = 1
                     final_columns.append(h_clean)
                     
-            # 5. Extract data rows, aligning row headers horizontally for side-by-side tables
             data_rows = []
-            excluded_hidden_rows = 0
-            is_summary_row_flags = []
-            is_flagged_row_flags = []
-            value_source_flags = []
-            
             for r_idx in range(min_r + data_start_row, max_r + 1):
                 if sheet_val.row_dimensions[r_idx + 1].hidden:
-                    excluded_hidden_rows += 1
                     continue
                     
-                # Read columns
                 row_data = []
-                row_val_sources = []
                 for c_idx in filtered_cols_indices:
                     val = grid_val[r_idx][c_idx]
                     form = grid_form[r_idx][c_idx]
-                    
-                    # Horizon label alignment: if first column of side table is empty, inherit from sheet Column A
                     if c_idx == min_c and c_idx > 0 and (val is None or str(val).strip() == ""):
                         first_col_val = grid_val[r_idx][0]
                         if first_col_val is not None and isinstance(first_col_val, str) and str(first_col_val).strip() != "":
                             val = first_col_val
-                    
-                    val_source = "cached"
                     if val is None and isinstance(form, str) and form.startswith("="):
                         val = form
-                        val_source = "formula_unevaluated"
                     row_data.append(val)
-                    row_val_sources.append(val_source)
-                    
                 data_rows.append(row_data)
-                value_source_flags.append("formula" if "formula_unevaluated" in row_val_sources else "cached")
-                
-                # Highlight formatting detection (first cell check)
-                cell = sheet_val.cell(row=r_idx + 1, column=min_c + 1)
-                is_summary = False
-                is_flagged = False
-                if cell.font and cell.font.bold:
-                    is_summary = True
-                if cell.fill and cell.fill.start_color and cell.fill.start_color.rgb not in ("00000000", "000000"):
-                    is_summary = True
-                if cell.font and cell.font.color and cell.font.color.rgb == "FFFF0000":
-                    is_flagged = True
-                is_summary_row_flags.append(is_summary)
-                is_flagged_row_flags.append(is_flagged)
                 
             if not data_rows:
                 continue
                 
             df = pd.DataFrame(data_rows, columns=final_columns)
-            
-            # If key-value block, convert to key/value columns
             if is_key_value_block(df):
                 non_empty_cols = [col for col in df.columns if not df[col].isna().all()]
                 kv_rows = []
@@ -550,63 +526,147 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                 df = pd.DataFrame(kv_rows, columns=["key", "value"])
                 final_columns = ["key", "value"]
             
-            # Try parsing numeric types safely
             df = coerce_numeric_columns(df)
             
-            db_table_name = sanitize_name(f"{filename}_{sheet_name}_{table_id}")
-            sqlite_tables.append((db_table_name, df, table_title))
-            
-            dtypes_dict = {col: str(dtype) for col, dtype in df.dtypes.items()}
-            
-            # ── Table Summary Chunk for Vector Search ──
-            preview_df = df.head(5).fillna("")
-            preview_md = preview_df.to_markdown(index=False)
-            title_str = f" (Title: {table_title})" if table_title else ""
-            summary_text = (
-                f"## File: {filename} | Sheet: {sheet_name}{title_str} (SQL Table: {db_table_name})\n"
-                f"Total Rows: {len(df)}\n"
-                f"Columns ({len(final_columns)}): {', '.join(final_columns)}\n\n"
-                f"### Sample Rows Preview:\n{preview_md}"
-            )
-            chunks.append({
-                "text": summary_text,
+            raw_sheet_tables.append({
+                "sheet_name": sheet_name,
+                "table_title": table_title,
+                "df": df,
+                "final_columns": final_columns,
+                "min_r": min_r,
+                "max_r": max_r,
+                "min_c": min_c,
+                "max_c": max_c,
+                "data_start_row": data_start_row,
+                "filtered_cols_indices": filtered_cols_indices
+            })
+
+        # Phase 1: Fragment Merging within sheet
+        merged_tables = []
+        for t in raw_sheet_tables:
+            merged = False
+            for prev in merged_tables:
+                if is_same_column_signature(prev["final_columns"], t["final_columns"]):
+                    # Concatenate dataframes
+                    try:
+                        t_df = t["df"]
+                        if list(t_df.columns) != list(prev["df"].columns):
+                            t_df.columns = prev["df"].columns
+                        prev["df"] = pd.concat([prev["df"], t_df], ignore_index=True)
+                        prev["max_r"] = max(prev["max_r"], t["max_r"])
+                        merged = True
+                        logger.info(f"Merged table fragment ({len(t_df)} rows) into {prev['table_title'] or 'table'} in sheet '{sheet_name}'. Total rows: {len(prev['df'])}")
+                        break
+                    except Exception as merge_err:
+                        logger.warning(f"Could not merge table fragments: {merge_err}")
+            if not merged:
+                merged_tables.append(t)
+
+        # Phase 1 Part B: Absorb tiny fragments (<= 3 rows) into sheet_leftovers
+        sheet_leftovers = []
+        final_sheet_tables = []
+        table_counter = 1
+        for t in merged_tables:
+            if len(t["df"]) <= 3 and len(merged_tables) > 1:
+                # Treat as leftover footnote/note text chunk
+                md_snippet = t["df"].to_markdown(index=False)
+                sheet_leftovers.append(f"### Note / Context (Rows {t['min_r']+1}-{t['max_r']+1}):\n{md_snippet}")
+            else:
+                table_id = f"table_{table_counter}"
+                table_counter += 1
+                t["table_id"] = table_id
+                t["db_table_name"] = sanitize_name(f"{filename}_{sheet_name}_{table_id}")
+                final_sheet_tables.append(t)
+
+        if sheet_leftovers:
+            leftover_text = f"## File: {filename} | Sheet: {sheet_name} (Additional Context & Notes)\n\n" + "\n\n".join(sheet_leftovers)
+            leftover_chunks.append({
+                "text": leftover_text,
                 "metadata": {
                     "source": file_path,
                     "source_name": filename,
                     "source_file": filename,
                     "type": "excel",
                     "sheet_name": sheet_name,
-                    "table_id": db_table_name,
-                    "row_range": [min_r + data_start_row + 1, min_r + data_start_row + len(df)],
-                    "columns": final_columns,
-                    "column_dtypes": dtypes_dict,
-                    "chunk_tier": "table_summary",
+                    "table_id": f"{sheet_name}_leftovers",
+                    "chunk_tier": "sheet_leftovers"
                 }
             })
 
-            # Smart windowing: scale window chunks based on table size.
-            # Large tables (>500 rows): summary only — SQL handles all lookups.
-            # Medium tables (51-500 rows): summary + up to 5 sampled windows for context.
-            # Small tables (<=50 rows): summary + all row windows (at most ceil(50/15)=4 extra chunks).
-            nrows = len(df)
-            if nrows <= 50:
-                window_size = 15
-                windows_to_emit = list(range(0, nrows, window_size))
-            elif nrows <= 500:
-                window_size = max(nrows // 5, 15)
-                windows_to_emit = list(range(0, nrows, window_size))[:5]
-            else:
-                windows_to_emit = []  # Summary chunk only — SQL router handles specific queries
+        all_sheet_tables.extend(final_sheet_tables)
 
-            for i in windows_to_emit:
-                window_df = df.iloc[i:i+window_size].fillna("")
+    # Register all final merged tables with SQLite / Postgres
+    for t in all_sheet_tables:
+        sqlite_tables.append((t["db_table_name"], t["df"], t["table_title"]))
+
+    # Phase 2: Deterministic Chunk Budget
+    # Build Table Summary Chunks
+    summary_chunks = []
+    for t in all_sheet_tables:
+        df = t["df"]
+        db_table_name = t["db_table_name"]
+        final_columns = t["final_columns"]
+        table_title = t["table_title"]
+        sheet_name = t["sheet_name"]
+        
+        preview_df = df.head(5).fillna("")
+        preview_md = preview_df.to_markdown(index=False)
+        title_str = f" (Title: {table_title})" if table_title else ""
+        summary_text = (
+            f"## File: {filename} | Sheet: {sheet_name}{title_str} (SQL Table: {db_table_name})\n"
+            f"Total Rows: {len(df)}\n"
+            f"Columns ({len(final_columns)}): {', '.join(final_columns)}\n\n"
+            f"### Sample Rows Preview:\n{preview_md}"
+        )
+        dtypes_dict = {col: str(dtype) for col, dtype in df.dtypes.items()}
+        summary_chunks.append({
+            "text": summary_text,
+            "metadata": {
+                "source": file_path,
+                "source_name": filename,
+                "source_file": filename,
+                "type": "excel",
+                "sheet_name": sheet_name,
+                "table_id": db_table_name,
+                "row_range": [t["min_r"] + 1, t["max_r"] + 1],
+                "columns": final_columns,
+                "column_dtypes": dtypes_dict,
+                "chunk_tier": "table_summary",
+            }
+        })
+
+    chunks.extend(summary_chunks)
+    chunks.extend(leftover_chunks)
+
+    # Proportional window chunking
+    total_summary_count = len(summary_chunks) + len(leftover_chunks)
+    window_budget = max(0, 100 - total_summary_count)
+
+    total_rows_all_tables = sum(len(t["df"]) for t in all_sheet_tables) or 1
+
+    for t in all_sheet_tables:
+        df = t["df"]
+        nrows = len(df)
+        if nrows <= 0 or window_budget <= 0:
+            continue
+            
+        # Proportion of budget assigned to this table
+        prop_windows = int((nrows / total_rows_all_tables) * window_budget)
+        target_windows = min(max(prop_windows, 1 if nrows <= 50 else 0), 5)
+
+        if target_windows > 0:
+            step = max(nrows // target_windows, 15)
+            window_indices = list(range(0, nrows, step))[:target_windows]
+            for i in window_indices:
+                window_df = df.iloc[i:i+15].fillna("")
                 window_df = window_df.copy()
                 for col in window_df.columns:
                     if window_df[col].dtype == object:
                         window_df[col] = window_df[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', '', regex=False)
                 md_table = window_df.to_markdown(index=False)
-                title_hdr = f" (Title: {table_title})" if table_title else ""
-                chunk_text = f"## Sheet: {sheet_name}{title_hdr} (Table: {table_id}, Rows {min_r + data_start_row + i + 1}-{min_r + data_start_row + min(i+window_size, nrows) + 1})\n\n{md_table}"
+                title_hdr = f" (Title: {t['table_title']})" if t['table_title'] else ""
+                chunk_text = f"## Sheet: {t['sheet_name']}{title_hdr} (Table: {t['table_id']}, Rows {t['min_r'] + i + 1}-{t['min_r'] + min(i+15, nrows) + 1})\n\n{md_table}"
+                dtypes_dict = {col: str(dtype) for col, dtype in df.dtypes.items()}
                 chunks.append({
                     "text": chunk_text,
                     "metadata": {
@@ -614,34 +674,16 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                         "source_name": filename,
                         "source_file": filename,
                         "type": "excel",
-                        "sheet_name": sheet_name,
-                        "table_id": table_id,
-                        "row_range": [min_r + data_start_row + i + 1, min_r + data_start_row + min(i+window_size, nrows) + 1],
-                        "columns": final_columns,
+                        "sheet_name": t['sheet_name'],
+                        "table_id": t['db_table_name'],
+                        "row_range": [t['min_r'] + i + 1, t['min_r'] + min(i+15, nrows) + 1],
+                        "columns": t['final_columns'],
                         "column_dtypes": dtypes_dict,
-                        "value_source": "cached",
-                        "excluded_hidden_rows": excluded_hidden_rows,
                         "chunk_tier": "markdown_window"
                     }
                 })
 
-    # Per-file safety cap. With the 3-tier adaptive logic (large tables emit 1
-    # summary, medium emit ≤5 windows, small emit ≤4 windows), a normal file should
-    # never approach this limit. If it does, something unexpected happened in table
-    # segmentation and we cap rather than flood Neon with thousands of embeddings.
-    MAX_CHUNKS_PER_FILE = 100
-    if len(chunks) > MAX_CHUNKS_PER_FILE:
-        logger.warning(
-            f"⚠️  Excel {filename}: chunk count {len(chunks)} exceeds cap {MAX_CHUNKS_PER_FILE}. "
-            f"Keeping first {MAX_CHUNKS_PER_FILE} (summary-tier preferred). "
-            f"File has {len(sqlite_tables)} detected table(s) — consider splitting the file."
-        )
-        # Prioritise table_summary chunks over markdown_windows so metadata is preserved.
-        summaries = [c for c in chunks if c["metadata"].get("chunk_tier") == "table_summary"]
-        windows   = [c for c in chunks if c["metadata"].get("chunk_tier") != "table_summary"]
-        chunks = (summaries + windows)[:MAX_CHUNKS_PER_FILE]
-
-    logger.info(f"Excel {filename}: {len(sqlite_tables)} table(s) → {len(chunks)} vector chunk(s) (all tables also stored in SQL).")
+    logger.info(f"Excel {filename}: {len(sqlite_tables)} merged table(s) → {len(chunks)} vector chunk(s) (all tables stored in SQL).")
     return chunks, sqlite_tables
 
 def load_tables_to_sqlite(sqlite_tables: List[Tuple[str, pd.DataFrame, str]], company_id: str = None):

@@ -70,6 +70,50 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
     if not schema_map:
         return None
 
+    # Two-Stage Routing: if schema has > 15 tables, ask LLM to shortlist top 3 candidate tables first
+    if len(schema_map) > 15:
+        table_overview = ""
+        for t, info in schema_map.items():
+            title = info.get("title")
+            title_str = f" (Title: \"{title}\")" if title else ""
+            table_overview += f"- {t}{title_str}\n"
+
+        shortlist_prompt = f"""You are a database table selector. Given the user's query and a list of available database tables, select up to 3 table names that are most relevant to answering the query.
+
+Available Tables:
+{table_overview}
+
+User Query: {query_text}
+
+JSON Output format: {{"candidates": ["table_name_1", "table_name_2"]}}
+Output ONLY valid JSON."""
+        
+        candidates = []
+        for gkey in config.GROQ_API_KEYS:
+            try:
+                from groq import Groq
+                client = Groq(api_key=gkey)
+                res = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[{"role": "user", "content": shortlist_prompt}],
+                    temperature=0.0,
+                    max_tokens=100
+                )
+                txt = res.choices[0].message.content or ""
+                if "{" in txt:
+                    txt = txt[txt.find("{"):txt.rfind("}")+1]
+                    cdata = json.loads(txt)
+                    candidates = cdata.get("candidates", [])
+                    if candidates:
+                        break
+            except Exception:
+                continue
+
+        if candidates:
+            filtered_schema = {t: schema_map[t] for t in candidates if t in schema_map}
+            if filtered_schema:
+                schema_map = filtered_schema
+
     # Construct schema description for the router prompt.
     schema_desc = ""
     for t, info in schema_map.items():
@@ -81,6 +125,10 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
             sample_str = f" [Sample values: {', '.join(samples)}]" if samples else ""
             schema_desc += f"  - {c['name']} ({c['type']}){sample_str}\n"
         schema_desc += "\n"
+
+    # Cap total schema prompt size to 10,000 characters
+    if len(schema_desc) > 10000:
+        schema_desc = schema_desc[:10000] + "\n... [schema truncated]\n"
 
     system_msg = """You are an SQL routing agent. Your job is to analyze the user's query and decide if it requires querying the tenant's data tables (SQL) or doing a semantic text search (VECTOR).
 
@@ -468,6 +516,7 @@ CRITICAL INSTRUCTIONS ON SOURCES AND CITATIONS:
 - The user interface automatically displays clickable file badges at the bottom of your response based on the returned sources list.
 
 CRITICAL INSTRUCTIONS ON COUNTING AND SUMMARIES:
+- When a "Table Summary" or "Sample Rows Preview" snippet is in the context above, note that it shows only 5 sample preview rows. Never state a total count or report an exhaustive list based solely on preview rows. For exact totals and counts, state the Total Rows count given in the table summary or rely on database SQL results.
 - If a question asks for a count, list, or summation of items (e.g. "How many...", "List all...", "How many good-to-haves..."):
   1. Carefully find all instances of those items across the entire provided context block.
   2. List the items step-by-step mentally or in your reasoning to count them accurately.

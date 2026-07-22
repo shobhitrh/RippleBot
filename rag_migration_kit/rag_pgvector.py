@@ -60,6 +60,10 @@ class Config:
     MAX_BATCH_SIZE = 100
     MAX_BATCH_TOKENS = 90000
     WAIT_TIME = 0.3
+
+    # Indexing memory guard: embed + insert this many chunks at a time so peak
+    # process memory stays flat regardless of how many/large the files are.
+    INDEX_SLICE_SIZE = 100
     
     # LLM settings
     MAX_CONTEXT_TOKENS = 12000
@@ -833,21 +837,29 @@ class RAGEngine:
                 self._close_thread_conn()
 
     def _build_index_locked(self, force_rebuild: bool = False) -> bool:
-        """Build or update the index incrementally using file hashes."""
+        """
+        Build/update the index incrementally, STREAMING per file and per slice so
+        peak process memory stays flat regardless of how many/large the files are.
+        Previously every chunk + every 1024-dim embedding + every stringified
+        vector for all new files was held in RAM at once, which OOM-killed the
+        small Railway container on multi-file / large-spreadsheet ingests.
+
+        A file that fails (parse error, oversized, embedding failure) is marked
+        'failed' and skipped on future runs unless its bytes change — so one bad
+        file can't OOM-loop the service on every restart.
+        """
         logger.info("=" * 60)
         logger.info("📂 Discovering documents...")
-        
+
         files = discover_files(self.documents_dir)
-        
         if not files:
             logger.warning("No documents found. Please add files to documents/ folder")
             return False
-        
+
         logger.info(f"Found {len(files)} file(s) in documents folder")
-        
+
         cursor = self.conn.cursor()
-        
-        # Clear existing data if rebuilding
+
         if force_rebuild:
             logger.info("🗑️ Clearing existing index...")
             try:
@@ -855,55 +867,60 @@ class RAGEngine:
                 logger.info("✅ Database truncated.")
             except Exception as e:
                 logger.error(f"Failed to clear index: {e}")
-            
-        # Get existing index metadata for incremental updates
+
+        # Successfully-indexed files (have chunks) → change detection.
         indexed_files = {}
-        
+        # Previously-failed files → skip if unchanged (avoids OOM retry loop).
+        failed_files = {}
         if not force_rebuild:
             try:
-                logger.info("🔍 Retrieving existing documents metadata for change detection...")
-                cursor.execute("SELECT c.id, c.filename, d.hash FROM chunks c JOIN documents d ON c.filename = d.filename AND c.company_id = d.company_id WHERE d.company_id = %s", (self.company_id,))
-                rows = cursor.fetchall()
-                for cid, filename, file_hash in rows:
-                    if filename not in indexed_files:
-                        indexed_files[filename] = {'hash': file_hash, 'ids': []}
-                    indexed_files[filename]['ids'].append(cid)
+                logger.info("🔍 Retrieving existing document metadata for change detection...")
+                cursor.execute(
+                    "SELECT c.filename, d.hash FROM chunks c "
+                    "JOIN documents d ON c.filename = d.filename AND c.company_id = d.company_id "
+                    "WHERE d.company_id = %s", (self.company_id,))
+                for filename, file_hash in cursor.fetchall():
+                    indexed_files.setdefault(filename, file_hash)
                 logger.info(f"Loaded metadata for {len(indexed_files)} indexed file(s).")
+
+                cursor.execute(
+                    "SELECT filename, hash FROM documents "
+                    "WHERE company_id = %s AND index_status = 'failed'", (self.company_id,))
+                for filename, file_hash in cursor.fetchall():
+                    failed_files[filename] = file_hash
+                if failed_files:
+                    logger.info(f"{len(failed_files)} previously-failed file(s) on record.")
             except Exception as e:
-                logger.error(f"Error fetching metadata from database: {e}. Falling back to full rebuild.")
-                indexed_files = {}
-                
-        # Identify changes
+                logger.error(f"Error fetching metadata: {e}. Falling back to full rebuild.")
+                indexed_files, failed_files = {}, {}
+
         current_files_by_path = {f['path']: f for f in files}
-        
         files_to_delete = []
         files_to_process = []
-        
-        # 1. Detect deleted files
-        for indexed_path, info in indexed_files.items():
+
+        # Deleted files (were indexed, now gone from disk).
+        for indexed_path in indexed_files:
             if indexed_path not in current_files_by_path:
                 files_to_delete.append(indexed_path)
-                
-        # 2. Detect new or modified files
+
+        # New or modified files.
         for f in files:
             path = f['path']
             current_hash = f['hash']
-            
-            if path not in indexed_files:
-                # New file
-                files_to_process.append(f)
-                logger.info(f"🆕 New file detected: {f['name']}")
-            else:
-                indexed_hash = indexed_files[path]['hash']
-                if current_hash != indexed_hash:
-                    # Modified file
+            if path in indexed_files:
+                if current_hash != indexed_files[path]:
                     files_to_delete.append(path)
                     files_to_process.append(f)
                     logger.info(f"🔄 Modified file detected: {f['name']}")
                 else:
                     logger.info(f"✅ Unchanged file skipped: {f['name']}")
-                    
-        # Perform deletions
+            elif path in failed_files and failed_files[path] == current_hash:
+                logger.warning(f"⏭️ Skipping previously-failed file (unchanged): {f['name']}")
+            else:
+                files_to_process.append(f)
+                logger.info(f"🆕 New file detected: {f['name']}")
+
+        # Deletions (connection is autocommit).
         if files_to_delete:
             logger.info("=" * 60)
             logger.info(f"🗑️ Deleting chunks for {len(files_to_delete)} removed/modified file(s)...")
@@ -913,97 +930,113 @@ class RAGEngine:
                     logger.info(f"Deleted {Path(path).name} from PostgreSQL (cascade removed chunks)")
                 except Exception as e:
                     logger.error(f"Failed to delete records for {path}: {e}")
-            
-        # Process and embed new/modified files
+
         if not files_to_process:
             logger.info("=" * 60)
             logger.info("✅ No new or modified files to index. Database is up to date!")
             return True
-            
+
         logger.info("=" * 60)
-        logger.info(f"🔨 Processing {len(files_to_process)} new/modified file(s)...")
-        
-        all_chunks = []
+        logger.info(f"🔨 Processing {len(files_to_process)} new/modified file(s) (streaming)...")
+
+        any_ok = False
         for file_info in files_to_process:
             try:
-                chunks = process_file(file_info, self.company_id)
-                all_chunks.extend(chunks)
-            except DocumentProcessingError as e:
-                logger.error(f"Skipping {file_info['name']}: {e}")
-                
-        if not all_chunks:
-            logger.warning("No new chunks created from the processed files")
-            return True
-            
-        logger.info(f"Generated {len(all_chunks)} new chunks.")
-        
-        # Generate embeddings
+                if self._index_one_file(cursor, file_info):
+                    any_ok = True
+            except Exception as e:
+                logger.error(f"❌ Failed to index {file_info['name']}: {e}", exc_info=True)
+                try:
+                    cursor.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                self._mark_file_failed(file_info['path'], file_info['hash'], str(e))
+
         logger.info("=" * 60)
-        logger.info("🧮 Generating embeddings for new chunks...")
-        
-        chunk_texts = [c['text'] for c in all_chunks]
-        embeddings = self._embed_with_retry(chunk_texts)
-        
-        # Add to PostgreSQL
-        logger.info("💾 Storing new chunks in PostgreSQL...")
+        logger.info(f"✅ Index update complete. Total chunks: {self.get_chunk_count()}")
+        return any_ok
+
+    def _index_one_file(self, cursor, file_info: Dict) -> bool:
+        """
+        Chunk, embed, and store ONE file. Embeddings and inserts happen in slices
+        of INDEX_SLICE_SIZE so only one slice's vectors are ever in memory. Runs in
+        a single transaction so a mid-file failure leaves no partial chunks.
+        Returns True if chunks were stored.
+        """
         import uuid
-        ids = [f"chunk_{uuid.uuid4().hex[:16]}" for _ in range(len(all_chunks))]
-        
-        try:
-            cursor.execute("BEGIN;")
-            
-            # 1. Insert documents
-            processed_files = {}
-            for chunk in all_chunks:
-                filename = chunk['metadata']['source']
-                file_hash = chunk['metadata']['file_hash']
-                processed_files[filename] = {
-                    'path': filename,
-                    'hash': file_hash,
-                    'department': chunk['metadata'].get('department', ''),
-                    'uploaded_by': chunk['metadata'].get('uploaded_by', ''),
-                    'category': chunk['metadata'].get('category', ''),
-                    'vector_count': 0
-                }
-            
-            for chunk in all_chunks:
-                filename = chunk['metadata']['source']
-                processed_files[filename]['vector_count'] += 1
-                
-            for filename, doc in processed_files.items():
-                cursor.execute("""
-                    INSERT INTO documents (company_id, filename, path, hash, department, uploaded_by, category, index_status, vector_count)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'indexed', %s)
-                    ON CONFLICT (company_id, filename) DO UPDATE
-                    SET hash = EXCLUDED.hash, index_status = 'indexed', vector_count = EXCLUDED.vector_count, updated_at = CURRENT_TIMESTAMP
-                """, (self.company_id, filename, doc['path'], doc['hash'], doc['department'], doc['uploaded_by'], doc['category'], doc['vector_count']))
 
-            # 2. Insert chunks
-            chunk_data = []
-            for i, chunk in enumerate(all_chunks):
-                cid = ids[i]
-                filename = chunk['metadata']['source']
-                content = chunk['text']
-                meta_json = json.dumps(chunk['metadata'], default=str)
-                embed_str = f"[{','.join(map(str, embeddings[i]))}]"
-                chunk_data.append((cid, self.company_id, filename, chunk['metadata'].get('chunk_index', chunk['metadata'].get('chunk_id', i)), content, meta_json, embed_str))
+        chunks = process_file(file_info, self.company_id)
+        if not chunks:
+            logger.warning(f"No chunks created from {file_info['name']}; nothing to store.")
+            return False
 
+        # Every chunk of one file shares the same source filename + hash.
+        meta0 = chunks[0]['metadata']
+        filename = meta0.get('source', file_info['path'])
+        file_hash = meta0.get('file_hash', file_info['hash'])
+        slice_size = getattr(config, "INDEX_SLICE_SIZE", 100)
+        n = len(chunks)
+
+        cursor.execute("BEGIN;")
+        # Parent row first (FK target); 'pending' until every slice lands.
+        cursor.execute("""
+            INSERT INTO documents (company_id, filename, path, hash, department, uploaded_by, category, index_status, error_message, vector_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', NULL, 0)
+            ON CONFLICT (company_id, filename) DO UPDATE
+            SET hash = EXCLUDED.hash, department = EXCLUDED.department, uploaded_by = EXCLUDED.uploaded_by,
+                category = EXCLUDED.category, index_status = 'pending', error_message = NULL,
+                vector_count = 0, updated_at = CURRENT_TIMESTAMP
+        """, (self.company_id, filename, filename, file_hash,
+              meta0.get('department', ''), meta0.get('uploaded_by', ''), meta0.get('category', '')))
+
+        stored = 0
+        for start in range(0, n, slice_size):
+            part = chunks[start:start + slice_size]
+            texts = [c['text'] for c in part]
+            embeddings = self._embed_with_retry(texts)  # one bounded slice
+            rows = []
+            for c, emb in zip(part, embeddings):
+                cid = f"chunk_{uuid.uuid4().hex[:16]}"
+                embed_str = "[" + ",".join(map(str, emb)) + "]"
+                rows.append((
+                    cid, self.company_id, filename,
+                    c['metadata'].get('chunk_index', c['metadata'].get('chunk_id', stored)),
+                    c['text'], json.dumps(c['metadata'], default=str), embed_str,
+                ))
+                stored += 1
             execute_values(cursor, """
                 INSERT INTO chunks (id, company_id, filename, chunk_index, content, metadata, embedding)
                 VALUES %s
-            """, chunk_data)
-            
-            cursor.execute("COMMIT;")
-            logger.info(f"✅ Index updated successfully! Total chunks: {self.get_chunk_count()}")
-            return True
-            
+            """, rows)
+            logger.info(f"  • {file_info['name']}: stored {stored}/{n} chunks")
+            del texts, embeddings, rows  # free the slice before the next one
+
+        cursor.execute("""
+            UPDATE documents SET index_status = 'indexed', vector_count = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE company_id = %s AND filename = %s
+        """, (stored, self.company_id, filename))
+        cursor.execute("COMMIT;")
+        logger.info(f"✅ Indexed {file_info['name']} ({stored} chunks).")
+        del chunks
+        return True
+
+    def _mark_file_failed(self, filename: str, file_hash: str, error: str) -> None:
+        """
+        Record a file as 'failed' (autocommit) so future builds skip it unless its
+        bytes change — a single bad/oversized file can't OOM-loop the service.
+        """
+        try:
+            cur = self.conn.cursor()
+            cur.execute("""
+                INSERT INTO documents (company_id, filename, path, hash, department, uploaded_by, category, index_status, error_message, vector_count)
+                VALUES (%s, %s, %s, %s, '', '', '', 'failed', %s, 0)
+                ON CONFLICT (company_id, filename) DO UPDATE
+                SET hash = EXCLUDED.hash, index_status = 'failed',
+                    error_message = EXCLUDED.error_message, updated_at = CURRENT_TIMESTAMP
+            """, (self.company_id, filename, filename, file_hash, (error or "")[:2000]))
+            logger.warning(f"Marked '{Path(filename).name}' as failed; skipped until it changes.")
         except Exception as e:
-            try:
-                cursor.execute("ROLLBACK;")
-            except Exception:
-                pass
-            logger.error(f"Database transaction failed: {e}")
-            return False
+            logger.error(f"Could not mark file failed: {e}")
     
     def query(self, query_text: str, top_k: int = None, use_llm: bool = True) -> Dict:
         """Query the RAG system."""

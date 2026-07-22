@@ -53,7 +53,11 @@ class Config:
     MAX_BATCH_SIZE = 100
     MAX_BATCH_TOKENS = 90000
     WAIT_TIME = 0.3
-    
+
+    # Indexing memory guard: embed + store this many chunks at a time so peak
+    # process memory stays flat regardless of how many/large the files are.
+    INDEX_SLICE_SIZE = 100
+
     # LLM settings
     MAX_CONTEXT_TOKENS = 12000  # Increased from 6000
     LLM_MODEL = "llama-3.3-70b-versatile"
@@ -847,47 +851,56 @@ class RAGEngine:
             return True
             
         logger.info("=" * 60)
-        logger.info(f"🔨 Processing {len(files_to_process)} new/modified file(s)...")
-        
-        all_chunks = []
+        logger.info(f"🔨 Processing {len(files_to_process)} new/modified file(s) (streaming)...")
+
+        # Stream per file and per slice: only one slice's chunks + embeddings are
+        # ever in memory, so many/large files can't spike RAM. A file that fails
+        # is skipped (logged) rather than aborting the whole batch.
+        import uuid
+        slice_size = getattr(config, "INDEX_SLICE_SIZE", 100)
+        any_ok = False
+
         for file_info in files_to_process:
             try:
                 chunks = process_file(file_info, self.company_id)
-                all_chunks.extend(chunks)
             except DocumentProcessingError as e:
                 logger.error(f"Skipping {file_info['name']}: {e}")
-                
-        if not all_chunks:
-            logger.warning("No new chunks created from the processed files")
-            return True
-            
-        logger.info(f"Generated {len(all_chunks)} new chunks.")
-        
-        # Generate embeddings
-        logger.info("=" * 60)
-        logger.info("🧮 Generating embeddings for new chunks...")
-        
-        chunk_texts = [c['text'] for c in all_chunks]
-        embeddings = self._embed_with_retry(chunk_texts)
-        
-        # Add to ChromaDB
-        logger.info("💾 Storing new chunks in ChromaDB...")
-        import uuid
-        ids = [f"chunk_{uuid.uuid4().hex[:16]}" for _ in range(len(all_chunks))]
-        documents = chunk_texts
-        metadatas = [c['metadata'] for c in all_chunks]
-        
-        batch_size = 5000
-        for i in range(0, len(ids), batch_size):
-            self.collection.add(
-                ids=ids[i:i+batch_size],
-                embeddings=embeddings[i:i+batch_size],
-                documents=documents[i:i+batch_size],
-                metadatas=metadatas[i:i+batch_size]
-            )
-            
-        logger.info(f"✅ Index updated successfully! Total collection size: {self.collection.count()} chunks.")
-        return True
+                continue
+            except Exception as e:
+                logger.error(f"❌ Failed to process {file_info['name']}: {e}", exc_info=True)
+                continue
+
+            if not chunks:
+                logger.warning(f"No chunks created from {file_info['name']}; nothing to store.")
+                continue
+
+            n = len(chunks)
+            stored = 0
+            try:
+                for start in range(0, n, slice_size):
+                    part = chunks[start:start + slice_size]
+                    texts = [c['text'] for c in part]
+                    embeddings = self._embed_with_retry(texts)  # one bounded slice
+                    ids = [f"chunk_{uuid.uuid4().hex[:16]}" for _ in part]
+                    metadatas = [c['metadata'] for c in part]
+                    self.collection.add(
+                        ids=ids,
+                        embeddings=embeddings,
+                        documents=texts,
+                        metadatas=metadatas,
+                    )
+                    stored += len(part)
+                    logger.info(f"  • {file_info['name']}: stored {stored}/{n} chunks")
+                    del texts, embeddings, ids, metadatas
+                any_ok = True
+                logger.info(f"✅ Indexed {file_info['name']} ({stored} chunks).")
+            except Exception as e:
+                logger.error(f"❌ Failed to embed/store {file_info['name']}: {e}", exc_info=True)
+            finally:
+                del chunks
+
+        logger.info(f"✅ Index update complete. Total collection size: {self.collection.count()} chunks.")
+        return any_ok
     
     def query(self, query_text: str, top_k: int = None, use_llm: bool = True) -> Dict:
         """Query the RAG system."""

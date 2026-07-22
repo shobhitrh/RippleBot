@@ -65,7 +65,8 @@ There are **two GitHub repos** and it matters which you deploy from:
 | Variable | Value | Notes |
 |----------|-------|-------|
 | `VECTOR_BACKEND` | `pgvector` | `chroma` for local dev |
-| `POSTGRES_URI` | `${{Postgres.DATABASE_URL}}` | Railway reference — **Postgres must be in the same project** |
+| `POSTGRES_URI` | `${{Postgres.DATABASE_URL}}` *or* a Neon URI | Railway reference (same-project Postgres) **or** an external managed Postgres like Neon — see §12 |
+| `PGVECTOR_ANN_INDEX` | *(unset)* | `none` (default) = exact cosine search, no HNSW index. HNSW is disk-hungry and filled the small Railway volume; leave off on small tiers. Set `hnsw` (or `ivfflat`) only on a larger volume. |
 | `VOYAGE_API_KEY2` | `<key>` | embeddings + reranking (required) |
 | `GROQ_API_KEY` | `<key>` | primary LLM |
 | `GROQ_API_KEY2`, `GROQ_API_KEY3` | `<keys>` | fallback LLM keys (optional) |
@@ -159,6 +160,8 @@ These are the real bugs we hit going from localhost → cloud. Most were "works 
 | 6 | `invalid error value specified` during indexing (intermittent) | One psycopg2 connection **shared across threads** (event loop + watcher timer threads + chat threadpool) — psycopg2 forbids this | **Thread-local connections** (each thread its own), serialize builds |
 | 7 | `invalid error value specified` (again, deterministic) | `df.apply(pd.to_numeric, errors='ignore')` — `errors='ignore'` was **removed in pandas 3.x** (cloud) while local pandas 2.x only warned | Version-proof `coerce_numeric_columns()` helper |
 | 8 | Documents vanished / re-upload needed after redeploy | Railway container disk is **ephemeral**; uploads + SQLite tables lived there | Persistent **Volume** at `knowledge_base` + **startup catch-up indexer** |
+| 9 | `web` service **Out of memory**, multi-file ingest "kept processing" forever | The index build held **all chunks + all embeddings + all stringified vectors** for every new file in RAM at once → OOM-kill → restart → catch-up reindex → OOM loop | **Streaming indexer**: process one file at a time, embed+insert in 100-chunk slices, free each slice. Failed files marked `index_status='failed'` and skipped so one bad file can't OOM-loop |
+| 10 | **Postgres crashed**, all features down; `No space left on device` on startup | The **HNSW vector index** (+ WAL bloat from the OOM loop) filled the small 500 MB Railway volume to 100%; Postgres couldn't even write startup WAL → crash loop | Made the ANN index **opt-in** (`PGVECTOR_ANN_INDEX`, default `none` = exact search) and **auto-drop** any leftover HNSW on startup to reclaim disk. Grow the volume (or move to Neon, §12) if it won't boot |
 
 **Meta-lessons**
 - *"Works on localhost" ≠ works in the cloud.* The killers were dependency-version drift (pandas 3), a different default backend (chroma vs pgvector so a whole module never imported), and platform assumptions (ephemeral disk, cross-project networking).
@@ -280,3 +283,55 @@ Prerequisite: Fireflies must actually be recording those meetings (the org has i
 deployed team-wide / bot auto-joins). If workspace webhooks aren't on your plan, a
 fallback is a scheduled job that polls the admin API for recent workspace
 transcripts and ingests any with a client domain.
+
+---
+
+## 12. Using an external managed Postgres (Neon) instead of Railway's DB
+
+Railway's small-tier Postgres volume is only ~500 MB and, being a self-managed
+volume, will crash the whole DB when it fills (see §7 #10). Moving the database to
+a managed provider (**Neon** recommended — serverless Postgres, native pgvector,
+storage/compute separated so a full disk can't take the process down, scales to
+zero) removes that failure mode. **No code change** — the app just reads
+`POSTGRES_URI`.
+
+### Why Neon
+- Native **pgvector** (`CREATE EXTENSION vector`), so the existing pgvector engine
+  works unchanged.
+- Fully managed & serverless — nothing stored on the Railway box; WAL/checkpoints
+  handled for you (no bloat crashes).
+- Postgres = the most widely understood DB, easy for anyone to operate.
+
+### Region — co-locate with the `web` service, not with users
+The heavy traffic is **web ↔ DB** (many queries per request), so the DB must sit in
+the **same region as the Railway `web` service**. Pick the DB region to match
+Railway's region:
+- **Serving India:** move the Railway `web` service to **Singapore** (Settings →
+  Region) and create the Neon project in **AWS `ap-southeast-1` (Singapore)** — the
+  closest region both platforms share.
+- **Leaving Railway in the US:** put Neon in that same US region (e.g. `us-east-1`).
+
+### Steps (config only)
+1. Create a **Neon** project; copy the connection string
+   (`postgresql://user:pass@ep-xxx.<region>.aws.neon.tech/dbname?sslmode=require`).
+2. Railway → `web` service → **Variables**: set **`POSTGRES_URI`** to that string.
+   (`POSTGRES_URI` takes precedence over Railway's `DATABASE_URL`.) Keep
+   `VECTOR_BACKEND=pgvector` and `PGVECTOR_ANN_INDEX` **unset** (exact search, no
+   disk-hungry HNSW).
+3. **Redeploy** `web`. On boot it connects to Neon, runs `CREATE EXTENSION vector`,
+   creates the tables, and the **startup catch-up indexer re-embeds all files from
+   the `web-volume`** into Neon (no `pg_dump` needed — the files on the volume are
+   the source of truth).
+4. Once chat/knowledge/meetings work, **delete the Railway Postgres service + its
+   volume** to stop it counting against usage.
+
+### Notes
+- **Re-indexing cost:** step 3 re-runs Voyage embeddings for all files once. Modest
+  cost; won't OOM thanks to the streaming indexer (§7 #9).
+- **Cold starts:** Neon suspends when idle; first query after a quiet spell resumes
+  in ~a second — fine for the app and Fireflies webhooks.
+- **Secrets:** keep the Neon URI only in Railway Variables, never in git.
+- **Still local:** the quantitative-query (Tier-C) tables are per-tenant **SQLite on
+  the `web-volume`**. They're persistent and rebuilt from the Excel files, so they
+  survive restarts — but they are not yet in Postgres. Moving them into the managed
+  Postgres (fully stateless container) is a planned, separately-verified change.

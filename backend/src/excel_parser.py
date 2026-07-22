@@ -691,51 +691,15 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
     return chunks, sqlite_tables
 
 def load_tables_to_sqlite(sqlite_tables: List[Tuple[str, pd.DataFrame, str]], company_id: str = None):
-    """Save the parsed tables to this tenant's SQLite database (Tier C)."""
-    db_path = get_db_path(company_id)
-    try:
-        conn = sqlite3.connect(db_path)
-        # Create metadata table if not exists
-        conn.execute("CREATE TABLE IF NOT EXISTS __table_metadata__ (table_name TEXT PRIMARY KEY, title TEXT)")
-        
-        for table_name, df, title in sqlite_tables:
-            # Format datetime columns to string ISO format to prevent SQLite BLOB/insertion failures
-            df = df.copy()
-            for col in df.columns:
-                if pd.api.types.is_datetime64_any_dtype(df[col]):
-                    df[col] = df[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-                else:
-                    df[col] = df[col].apply(lambda x: x.isoformat() if hasattr(x, 'isoformat') else x)
-                    
-            df.to_sql(name=table_name, con=conn, if_exists="replace", index=False)
-            conn.execute("INSERT OR REPLACE INTO __table_metadata__ (table_name, title) VALUES (?, ?)", (table_name, title))
-            logger.info(f"Loaded database table: {table_name} ({len(df)} rows)")
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error loading tables to SQLite: {e}")
+    """
+    Persist parsed Tier-C tables for this tenant. Legacy name kept for the engine
+    call sites, but it now dispatches (via table_store) to Postgres when
+    VECTOR_BACKEND=pgvector, or SQLite for local dev. See backend/src/table_store.py.
+    """
+    from backend.src import table_store
+    table_store.load_tables(sqlite_tables, company_id)
 
 def delete_tables_from_sqlite(filename: str, company_id: str = None):
-    """Delete all tables associated with a filename from this tenant's SQLite DB."""
-    db_path = get_db_path(company_id)
-    if not os.path.exists(db_path):
-        return
-    prefix = sanitize_name(filename)
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        # Ensure metadata table exists so drop query doesn't crash on empty db
-        cursor.execute("CREATE TABLE IF NOT EXISTS __table_metadata__ (table_name TEXT PRIMARY KEY, title TEXT)")
-        
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = [row[0] for row in cursor.fetchall()]
-        for t in tables:
-            if t.startswith(prefix) and t != "__table_metadata__":
-                cursor.execute(f"DROP TABLE {t}")
-                cursor.execute("DELETE FROM __table_metadata__ WHERE table_name = ?", (t,))
-                logger.info(f"Dropped SQLite table: {t}")
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error dropping SQLite tables for {filename}: {e}")
+    """Delete all Tier-C tables for a filename (Postgres or SQLite; see table_store)."""
+    from backend.src import table_store
+    table_store.delete_tables_for_file(filename, company_id)

@@ -1,7 +1,6 @@
 import os
 import re
 import json
-import sqlite3
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
@@ -11,8 +10,9 @@ from fastapi.responses import StreamingResponse
 from fastapi.concurrency import run_in_threadpool
 from backend.src import config
 from backend.src import companies
+from backend.src import table_store
 from backend.src.rag_engine import get_engine
-from backend.src.excel_parser import get_db_path, sanitize_name
+from backend.src.excel_parser import sanitize_name
 
 def _persona(company_display: str) -> str:
     """Shared system-prompt preamble that locks the assistant to one customer
@@ -58,66 +58,31 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
     """
     Query-Time Router: Classify query dynamically using LLM.
     If it requires SQL (count, average, sum, min, max, global filters),
-    it generates the exact SQLite query, runs it against this tenant's Tier C DB,
-    and formats the results to bypass semantic search and guarantee no data loss.
+    it generates the exact SQL query, runs it against this tenant's Tier-C tables
+    (Postgres or SQLite, via table_store), and formats the results to bypass
+    semantic search and guarantee no data loss.
     """
-    db_path = get_db_path(company_id)
-    if not os.path.exists(db_path):
-        return None
-        
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = [row[0] for row in cursor.fetchall() if not row[0].startswith("sqlite_") and row[0] != "__table_metadata__"]
-        if not tables:
-            conn.close()
-            return None
-            
-        # Get table titles mapping from metadata table
-        table_titles = {}
-        try:
-            cursor.execute("SELECT table_name, title FROM __table_metadata__")
-            table_titles = dict(cursor.fetchall())
-        except Exception:
-            pass
-            
-        schema = {}
-        for t in tables:
-            cursor.execute(f"PRAGMA table_info({t})")
-            cols = cursor.fetchall()
-            col_info = []
-            for c in cols:
-                col_name = c[1]
-                col_type = c[2]
-                try:
-                    cursor.execute(f'SELECT DISTINCT "{col_name}" FROM "{t}" WHERE "{col_name}" IS NOT NULL LIMIT 25')
-                    raw_samples = [str(r[0]).strip() for r in cursor.fetchall() if r[0] is not None]
-                    samples = [s for s in raw_samples if s and len(s) < 60]
-                    if samples:
-                        sample_str = f" [Sample values: {', '.join(samples[:15])}]"
-                    else:
-                        sample_str = ""
-                except Exception:
-                    sample_str = ""
-                col_info.append(f"{col_name} ({col_type}){sample_str}")
-            schema[t] = col_info
-        conn.close()
+        schema_map = table_store.get_router_schema(company_id)
     except Exception as e:
-        logger.error(f"Failed to read SQLite schema: {e}")
+        logger.error(f"Failed to read Tier-C schema: {e}")
+        return None
+    if not schema_map:
         return None
 
-    # Construct schema description for prompt
+    # Construct schema description for the router prompt.
     schema_desc = ""
-    for t, cols in schema.items():
-        title = table_titles.get(t)
+    for t, info in schema_map.items():
+        title = info.get("title")
         title_str = f" (Table Title: \"{title}\")" if title else ""
         schema_desc += f"Table: {t}{title_str}\nColumns:\n"
-        for c in cols:
-            schema_desc += f"  - {c}\n"
+        for c in info.get("columns", []):
+            samples = c.get("samples") or []
+            sample_str = f" [Sample values: {', '.join(samples)}]" if samples else ""
+            schema_desc += f"  - {c['name']} ({c['type']}){sample_str}\n"
         schema_desc += "\n"
 
-    system_msg = """You are an SQL routing agent. Your job is to analyze the user's query and decide if it requires querying the SQLite database tables (SQL) or doing a semantic text search (VECTOR).
+    system_msg = """You are an SQL routing agent. Your job is to analyze the user's query and decide if it requires querying the tenant's data tables (SQL) or doing a semantic text search (VECTOR).
 
 Use {"route": "SQL", "sql_query": "..."} ONLY for questions that specifically require quantitative data analysis from tables: metrics, numbers, counts, aggregations, exact date lookups, mandays, fees, pricing options, or checking specific table cell values based on conditions.
 Use {"route": "VECTOR"} for questions that require explaining concepts, describing what something consists of, summarization, general knowledge from the documents, or if the question is conversational (e.g. "hi", "hello", "thanks").
@@ -139,7 +104,7 @@ Output: {"route": "SQL", "sql_query": "SELECT id, requirement, criticality FROM 
 RULES:
 1. ONLY write SELECT queries. Never write write/update queries.
 2. Only reference tables and columns EXACTLY as defined in the schema.
-3. CRITICAL: SQLite string comparisons are case-sensitive when using '='. You MUST always use LOWER(column) LIKE '%value%' or LOWER(column) = LOWER('value') for any string comparison filters to avoid case mismatch errors.
+3. CRITICAL: string comparisons are case-sensitive when using '='. You MUST always use LOWER(column) LIKE '%value%' or LOWER(column) = LOWER('value') for any string comparison filters to avoid case mismatch errors.
 4. CRITICAL INSTRUCTION FOR ROW METRICS: Look at the sample values for col_0 in each table schema. If col_0 contains metric/row names such as 'YoY', 'Manday', 'Total', 'Total License Fees', 'Year 1', 'Year 2', etc., and the user asks for one of these metrics or line items (such as 'yoy' or 'yoy rate'), you MUST select that row directly using: SELECT <column> FROM <table> WHERE LOWER(col_0) LIKE '%metric%'. DO NOT perform percentage difference formulas like (col2 - col1) / col1.
 5. CRITICAL: NEVER combine aggregate functions (e.g. COUNT(*), SUM()) with un-aggregated column names in the same SELECT statement without a GROUP BY (e.g. NEVER write SELECT COUNT(id), id). If the user asks both "how many" and "what are they", SELECT the matching rows directly (e.g. SELECT id, requirement, criticality FROM ...); the downstream assistant will count the rows automatically.
 6. Output ONLY the JSON block, no markdown, no other text.
@@ -205,13 +170,8 @@ JSON Output:"""
             sql = data["sql_query"]
             logger.info(f"Query-Time Router selected SQL path: {sql}")
             
-            # Execute SQL
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            rows = cursor.fetchall()
-            col_names = [d[0] for d in cursor.description]
-            conn.close()
+            # Execute against this tenant's Tier-C tables (Postgres or SQLite).
+            col_names, rows = table_store.execute_select(sql, company_id)
             
             # Format results as a neat markdown table
             is_empty = True
@@ -234,10 +194,13 @@ JSON Output:"""
             # Match tables inside the SQL query to their source files for UI citations
             matched_files = []
             sql_lower = sql.lower()
-            for t_name in schema.keys():
-                if t_name in sql_lower:
-                    for f in os.listdir(config.DOCUMENTS_DIR):
-                        if sanitize_name(f) in t_name:
+            docs_dir = config.company_documents_dir(company_id)
+            listing = os.listdir(docs_dir) if os.path.isdir(docs_dir) else []
+            for t_name, info in schema_map.items():
+                if t_name.lower() in sql_lower:
+                    source_key = (info.get("source_key") or t_name).lower()
+                    for f in listing:
+                        if sanitize_name(f) in source_key:
                             matched_files.append(f)
                             break
                             

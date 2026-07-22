@@ -132,8 +132,13 @@ Output ONLY valid JSON."""
 
     system_msg = """You are an SQL routing agent. Your job is to analyze the user's query and decide if it requires querying the tenant's data tables (SQL) or doing a semantic text search (VECTOR).
 
-Use {"route": "SQL", "sql_query": "..."} ONLY for questions that specifically require quantitative data analysis from tables: metrics, numbers, counts, aggregations, exact date lookups, mandays, fees, pricing options, or checking specific table cell values based on conditions.
-Use {"route": "VECTOR"} for questions that require explaining concepts, describing what something consists of, summarization, general knowledge from the documents, or if the question is conversational (e.g. "hi", "hello", "thanks").
+Use {"route": "SQL", "sql_query": "..."} for:
+1. Quantitative data analysis from tables: metrics, numbers, counts, aggregations, exact date lookups, mandays, fees, pricing options.
+2. Checking specific table cell values or querying details for a specific entity, title, designation, code, role, or row item (e.g. "tell me about X", "details of X", "info on X", "who is X", "what is X").
+
+Use {"route": "VECTOR"} for:
+1. Explaining high-level business concepts, policies, process guidelines, or document summaries.
+2. Conversational greetings (e.g. "hi", "hello", "thanks").
 
 EXAMPLES:
 
@@ -149,12 +154,16 @@ Example 3 (List and Count Query):
 User Query: "How many questions have medium criticality? What are they?"
 Output: {"route": "SQL", "sql_query": "SELECT id, requirement, criticality FROM questions_table_1 WHERE LOWER(criticality) = LOWER('medium')"}
 
+Example 4 (Entity / Role / Designation Lookup):
+User Query: "tell me about Head-Wholesale Credit-CB"
+Output: {"route": "SQL", "sql_query": "SELECT * FROM master_values_table_1 WHERE LOWER(col_0) LIKE '%head-wholesale credit-cb%' OR LOWER(designation) LIKE '%head-wholesale credit-cb%' OR LOWER(title) LIKE '%head-wholesale credit-cb%'"}
+
 RULES:
 1. ONLY write SELECT queries. Never write write/update queries.
 2. Only reference tables and columns EXACTLY as defined in the schema.
 3. CRITICAL: string comparisons are case-sensitive when using '='. You MUST always use LOWER(column) LIKE '%value%' or LOWER(column) = LOWER('value') for any string comparison filters to avoid case mismatch errors.
 4. CRITICAL INSTRUCTION FOR ROW METRICS: Look at the sample values for col_0 in each table schema. If col_0 contains metric/row names such as 'YoY', 'Manday', 'Total', 'Total License Fees', 'Year 1', 'Year 2', etc., and the user asks for one of these metrics or line items (such as 'yoy' or 'yoy rate'), you MUST select that row directly using: SELECT <column> FROM <table> WHERE LOWER(col_0) LIKE '%metric%'. DO NOT perform percentage difference formulas like (col2 - col1) / col1.
-5. CRITICAL: NEVER combine aggregate functions (e.g. COUNT(*), SUM()) with un-aggregated column names in the same SELECT statement without a GROUP BY (e.g. NEVER write SELECT COUNT(id), id). If the user asks both "how many" and "what are they", SELECT the matching rows directly (e.g. SELECT id, requirement, criticality FROM ...); the downstream assistant will count the rows automatically.
+5. CRITICAL: NEVER combine aggregate functions (e.g. COUNT(*), SUM()) with un-aggregated column names in the same SELECT statement without a GROUP BY.
 6. Output ONLY the JSON block, no markdown, no other text.
 """
 

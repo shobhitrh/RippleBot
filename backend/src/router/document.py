@@ -192,21 +192,12 @@ async def import_fireflies_meeting(
 async def list_documents(company_id: str = CompanyId):
     """
     List this company's files with their index status and vector counts.
+    Combines physical container files with records stored in PostgreSQL.
     """
     company_id = config.normalize_company_id(company_id)
     docs_dir = config.company_documents_dir(company_id)
-    if not os.path.exists(docs_dir):
-        return []
 
-    # Get all files in directory, ignoring sidecar metadata and hidden files
-    all_files = []
-    for f in os.listdir(docs_dir):
-        full_path = os.path.join(docs_dir, f)
-        if os.path.isfile(full_path) and not f.startswith(".") and not f.startswith("~$") and not f.endswith(".metadata.json"):
-            all_files.append(f)
-
-    # Fetch index status from the vector store (backend-agnostic). If the store
-    # is offline we simply show the physical files with a "pending" status.
+    # Fetch index status from the vector store (backend-agnostic)
     db_docs = {}
     engine = get_engine(company_id, required=False)
     if engine is not None:
@@ -215,21 +206,37 @@ async def list_documents(company_id: str = CompanyId):
         except Exception as e:
             logger.error(f"Could not load indexed-document metadata: {e}")
 
+    # Collect all unique filenames (both physical on container & stored in DB)
+    all_filenames = set(db_docs.keys())
+    if os.path.exists(docs_dir):
+        for f in os.listdir(docs_dir):
+            full_path = os.path.join(docs_dir, f)
+            if os.path.isfile(full_path) and not f.startswith(".") and not f.startswith("~$") and not f.endswith(".metadata.json"):
+                all_filenames.add(f)
+
     result = []
-    for filename in all_files:
+    for filename in sorted(all_filenames):
         full_path = os.path.join(docs_dir, filename)
-        stat = os.stat(full_path)
+        file_size = 0
+        mod_time = datetime.utcnow().isoformat()
         
-        # Merge physical files with database record if it exists
+        if os.path.exists(full_path):
+            try:
+                stat = os.stat(full_path)
+                file_size = stat.st_size
+                mod_time = datetime.utcfromtimestamp(stat.st_mtime).isoformat()
+            except Exception:
+                pass
+        
         doc_info = {
             "filename": filename,
             "path": f"./backend/knowledge_base/{filename}",
-            "size": stat.st_size,
-            "modified": datetime.utcfromtimestamp(stat.st_mtime).isoformat(),
+            "size": file_size,
+            "modified": mod_time,
             "department": "General",
             "uploaded_by": "System",
             "category": "Document",
-            "index_status": "pending",
+            "index_status": "indexed" if filename in db_docs else "pending",
             "error_message": None,
             "vector_count": 0
         }

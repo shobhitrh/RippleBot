@@ -24,14 +24,71 @@ _SEED = [
 UNASSIGNED_ID = "unassigned"
 
 
-def _path() -> str:
-    return os.path.join(config.DOCUMENTS_DIR, "companies.json")
+def _get_pg_conn():
+    uri = config.POSTGRES_URI
+    if not uri:
+        return None
+    try:
+        import psycopg2
+        conn = psycopg2.connect(uri, connect_timeout=5)
+        conn.autocommit = True
+        return conn
+    except Exception as e:
+        logger.debug(f"PostgreSQL connection for companies failed: {e}")
+        return None
 
+def _init_pg_companies():
+    conn = _get_pg_conn()
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS companies (
+                    id VARCHAR(255) PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    domains TEXT[] DEFAULT '{}',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            # Seed default company if table is empty
+            cur.execute("SELECT COUNT(*) FROM companies;")
+            if cur.fetchone()[0] == 0:
+                for seed in _SEED:
+                    cur.execute(
+                        "INSERT INTO companies (id, name, domains) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING;",
+                        (seed["id"], seed["name"], seed["domains"])
+                    )
+    except Exception as e:
+        logger.error(f"Failed to init companies table in PG: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 def _load_raw() -> list:
+    conn = _get_pg_conn()
+    if conn:
+        try:
+            _init_pg_companies()
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, name, domains FROM companies ORDER BY created_at ASC;")
+                rows = cur.fetchall()
+                if rows:
+                    return [{"id": r[0], "name": r[1], "domains": r[2] or []} for r in rows]
+        except Exception as e:
+            logger.error(f"Error loading companies from PG: {e}")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    # Fallback to local companies.json
     p = _path()
     if not os.path.exists(p):
-        _save_raw(_SEED)
+        _save_raw_json(_SEED)
         return list(_SEED)
     try:
         with open(p, "r", encoding="utf-8") as f:
@@ -42,13 +99,34 @@ def _load_raw() -> list:
         return list(_SEED)
 
 
-def _save_raw(companies: list):
+def _save_raw_json(companies: list):
     try:
         os.makedirs(config.DOCUMENTS_DIR, exist_ok=True)
         with open(_path(), "w", encoding="utf-8") as f:
             json.dump(companies, f, indent=2)
     except Exception as e:
         logger.error(f"Could not save companies.json: {e}")
+
+def _save_raw(companies: list):
+    _save_raw_json(companies)
+    conn = _get_pg_conn()
+    if conn:
+        try:
+            _init_pg_companies()
+            with conn.cursor() as cur:
+                for c in companies:
+                    cur.execute("""
+                        INSERT INTO companies (id, name, domains)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, domains = EXCLUDED.domains;
+                    """, (c["id"], c["name"], c.get("domains", [])))
+        except Exception as e:
+            logger.error(f"Error saving company to PG: {e}")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def list_companies() -> list:

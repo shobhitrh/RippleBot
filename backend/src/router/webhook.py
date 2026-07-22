@@ -256,6 +256,13 @@ async def process_meeting(meeting_id: str, company_id: str = None):
             f.write(markdown)
         logger.info(f"Fireflies: saved {filepath}")
 
+        # Back the meeting file up to durable storage (survives ephemeral-disk wipe).
+        try:
+            from backend.src import file_store
+            file_store.mirror_dir(company_id, docs_dir)
+        except Exception as e:
+            logger.error(f"Fireflies: file_store mirror failed: {e}")
+
         # Index into this tenant's vector store (blocking → run off the event loop).
         engine = get_engine(company_id, required=False)
         if engine is not None:

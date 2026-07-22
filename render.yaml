@@ -6,19 +6,14 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn backend.src.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
-    # Persistent disk — WITHOUT this, Render wipes uploaded files on every deploy
-    # and restart (knowledge_base is ephemeral). Uploaded documents, meeting
-    # markdowns, and companies.json must live here to survive.
-    disk:
-      name: ripplebot-data
-      mountPath: /var/data
-      sizeGB: 1
+    # NOTE: Render's free tier has NO persistent disk and wipes the filesystem on
+    # every deploy AND every ~15-min idle spin-down. Uploaded files therefore must
+    # NOT rely on local disk — source files + companies.json are persisted in
+    # Postgres (see backend/src/file_store.py) and rehydrated to a scratch dir on
+    # boot. If you upgrade to a paid instance, add a `disk:` block here instead.
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
-      # Point all persisted files at the mounted disk (uploads, companies.json).
-      - key: DOCUMENTS_DIR
-        value: /var/data/knowledge_base
       - key: VECTOR_BACKEND
         value: pgvector
       - key: POSTGRES_URI

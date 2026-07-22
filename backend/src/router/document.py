@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import List, Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Header
 from backend.src import config
+from backend.src import file_store
 from backend.src.rag_engine import get_engine
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,8 @@ async def upload_document(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not save file: {str(e)}")
 
+    # Back the file up to durable storage so it survives an ephemeral-disk wipe.
+    file_store.mirror_dir(company_id, docs_dir)
     background_tasks.add_task(_trigger_index, company_id, safe_filename)
 
     return {
@@ -156,6 +159,7 @@ async def upload_documents(
 
     # One index pass for the whole batch (only if anything landed).
     if saved:
+        file_store.mirror_dir(company_id, docs_dir)  # durable backup of the batch
         background_tasks.add_task(_trigger_index, company_id, f"{len(saved)} file(s)")
 
     return {
@@ -286,6 +290,10 @@ async def delete_document(filename: str, company_id: str = CompanyId):
         except Exception as e:
             logger.error(f"Error deleting index records for {safe_filename}: {e}")
 
+    # Drop it from durable storage too, so it doesn't get rehydrated on next boot.
+    file_store.delete(company_id, safe_filename)
+    file_store.delete(company_id, safe_filename + ".metadata.json")
+
     if not file_exists and not deleted_physically:
         # File wasn't in directory, but we cleaned up DB just in case
         return {"status": "success", "message": f"Cleaned up database records for '{safe_filename}'."}
@@ -327,6 +335,10 @@ async def assign_document(filename: str, target_company_id: str = Form(...), com
             src_engine.delete_document(safe)
         except Exception as e:
             logger.error(f"assign: failed to de-index from source '{src}': {e}")
+
+    # Keep durable storage in sync with the move (removes from src, adds to dst).
+    file_store.mirror_dir(src, src_dir)
+    file_store.mirror_dir(dst, dst_dir)
 
     def reindex_target():
         try:
@@ -446,11 +458,20 @@ async def download_document(filename: str, company_id: str = CompanyId):
     from fastapi.responses import FileResponse
     company_id = config.normalize_company_id(company_id)
     safe_filename = os.path.basename(filename)
-    file_path = os.path.join(config.company_documents_dir(company_id), safe_filename)
-    
+    docs_dir = config.company_documents_dir(company_id)
+    file_path = os.path.join(docs_dir, safe_filename)
+
+    # If the ephemeral disk was wiped, restore this file from durable storage.
+    if not os.path.exists(file_path):
+        data = file_store.get(company_id, safe_filename)
+        if data is not None:
+            os.makedirs(docs_dir, exist_ok=True)
+            with open(file_path, "wb") as f:
+                f.write(data)
+
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
-        
+
     return FileResponse(
         path=file_path,
         filename=safe_filename,

@@ -36,6 +36,11 @@ for logger_name in ("uvicorn.access", "uvicorn", ""):
 def _index_existing_documents():
     """Index files already present in each tenant's folder (startup catch-up)."""
     try:
+        # First restore any source files from the durable store (hosts with an
+        # ephemeral disk, e.g. Render free tier, wipe the filesystem on restart).
+        from backend.src import file_store
+        file_store.hydrate_all()
+
         from backend.src.rag_engine import get_engine
         base = config.DOCUMENTS_DIR
         if not os.path.isdir(base):

@@ -202,6 +202,12 @@ def process_csv_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.Dat
                 }
             })
             
+    # Hard safety guard: A CSV file should NEVER emit more than 20 vector chunks.
+    MAX_EXCEL_CHUNKS = 20
+    if len(chunks) > MAX_EXCEL_CHUNKS:
+        logger.warning(f"Cap safety triggered for CSV {filename}: capped {len(chunks)} chunks to {MAX_EXCEL_CHUNKS}.")
+        chunks = chunks[:MAX_EXCEL_CHUNKS]
+
     return chunks, [(db_table_name, df, "")]
 
 def is_key_value_block(df: pd.DataFrame) -> bool:
@@ -591,6 +597,12 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                         }
                     })
                     
+    # Hard safety guard: An Excel file should NEVER emit more than 20 vector chunks total.
+    MAX_EXCEL_CHUNKS = 20
+    if len(chunks) > MAX_EXCEL_CHUNKS:
+        logger.warning(f"Cap safety triggered for Excel {filename}: capped {len(chunks)} chunks down to {MAX_EXCEL_CHUNKS}.")
+        chunks = chunks[:MAX_EXCEL_CHUNKS]
+
     return chunks, sqlite_tables
 
 def load_tables_to_sqlite(sqlite_tables: List[Tuple[str, pd.DataFrame, str]], company_id: str = None):

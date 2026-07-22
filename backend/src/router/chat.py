@@ -158,13 +158,18 @@ Example 4 (Entity / Role / Designation Lookup):
 User Query: "tell me about Head-Wholesale Credit-CB"
 Output: {"route": "SQL", "sql_query": "SELECT * FROM master_values_table_1 WHERE LOWER(col_0) LIKE '%head-wholesale credit-cb%' OR LOWER(designation) LIKE '%head-wholesale credit-cb%' OR LOWER(title) LIKE '%head-wholesale credit-cb%'"}
 
+Example 5 (Count Total Rows/Entries vs Distinct Values):
+User Query: "How many values/entries are in the field of education?"
+Output: {"route": "SQL", "sql_query": "SELECT COUNT(*) FROM education_table_1"}
+
 RULES:
 1. ONLY write SELECT queries. Never write write/update queries.
 2. Only reference tables and columns EXACTLY as defined in the schema.
 3. CRITICAL: string comparisons are case-sensitive when using '='. You MUST always use LOWER(column) LIKE '%value%' or LOWER(column) = LOWER('value') for any string comparison filters to avoid case mismatch errors.
 4. CRITICAL INSTRUCTION FOR ROW METRICS: Look at the sample values for col_0 in each table schema. If col_0 contains metric/row names such as 'YoY', 'Manday', 'Total', 'Total License Fees', 'Year 1', 'Year 2', etc., and the user asks for one of these metrics or line items (such as 'yoy' or 'yoy rate'), you MUST select that row directly using: SELECT <column> FROM <table> WHERE LOWER(col_0) LIKE '%metric%'. DO NOT perform percentage difference formulas like (col2 - col1) / col1.
 5. CRITICAL: NEVER combine aggregate functions (e.g. COUNT(*), SUM()) with un-aggregated column names in the same SELECT statement without a GROUP BY.
-6. Output ONLY the JSON block, no markdown, no other text.
+6. TOTAL COUNT vs DISTINCT: When asked "How many values/entries/items/records in [table/field]", generate SELECT COUNT(*) FROM <table> to return the total row count (e.g. 176). Only use SELECT DISTINCT or COUNT(DISTINCT col) if the user explicitly includes words like "unique", "distinct", or "types of".
+7. Output ONLY the JSON block, no markdown, no other text.
 """
 
     prompt = f"""Available Database Schema:

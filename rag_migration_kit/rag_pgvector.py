@@ -1305,6 +1305,23 @@ Answer:"""
         except Exception:
             return 0
 
+    def get_counts(self) -> Tuple[int, int]:
+        """Get (doc_count, chunk_count) in a single database roundtrip."""
+        if not self.conn:
+            return 0, 0
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM documents WHERE company_id = %s), "
+                "(SELECT COUNT(*) FROM chunks WHERE company_id = %s)",
+                (self.company_id, self.company_id),
+            )
+            r = cursor.fetchone()
+            return (r[0] if r else 0), (r[1] if r else 0)
+        except Exception:
+            return 0, 0
+
     # ---------------- BACKEND-AGNOSTIC HELPERS ----------------
     def list_indexed_documents(self) -> Dict[str, Dict]:
         """Return this tenant's indexed-document metadata keyed by base filename."""

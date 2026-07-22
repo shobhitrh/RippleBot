@@ -110,11 +110,15 @@ def engine_status(company_id: str = None) -> dict:
     if eng is None:
         return {"status": "error", "backend": config.VECTOR_BACKEND, "doc_count": 0, "chunk_count": 0}
     try:
+        if hasattr(eng, "get_counts"):
+            dc, cc = eng.get_counts()
+        else:
+            dc, cc = eng.get_doc_count(), eng.get_chunk_count()
         return {
             "status": "connected",
             "backend": config.VECTOR_BACKEND,
-            "doc_count": eng.get_doc_count(),
-            "chunk_count": eng.get_chunk_count(),
+            "doc_count": dc,
+            "chunk_count": cc,
         }
     except Exception as e:
         return {"status": "error", "backend": config.VECTOR_BACKEND, "error": str(e)}

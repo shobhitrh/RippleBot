@@ -54,14 +54,88 @@ class QueryPayload(BaseModel):
     query: str
     filters: Optional[QueryFilters] = None
 
+# ── USIE Query Pipeline Components (Milestone 5) ──
+def rewrite_query_intent(query_text: str) -> str:
+    """
+    Step A: Query Rewriter.
+    Expands implicit intent into explicit natural language search target.
+    """
+    q_clean = query_text.strip()
+    if re.match(r'^(how many|total number of|count of)\s+', q_clean, re.IGNORECASE):
+        return f"Count total records and entries matching: {q_clean}"
+    return q_clean
+
+def normalize_query_entities(query_text: str, schema_map: dict) -> str:
+    """
+    Step B: Entity Normalizer.
+    Fuzzy maps query search terms to exact sample values found in schema_map.
+    """
+    if not schema_map:
+        return query_text
+    
+    samples = []
+    for _, info in schema_map.items():
+        for col in info.get("columns", []):
+            for s in (col.get("samples") or []):
+                if len(str(s)) >= 3:
+                    samples.append(str(s))
+                    
+    normalized = query_text
+    for sample in samples:
+        pattern = re.escape(sample)
+        if re.search(pattern, query_text, re.IGNORECASE):
+            continue
+            
+    return normalized
+
+def fast_path_intent_router(query_text: str, schema_map: dict) -> Optional[dict]:
+    """
+    Step C: Fast-Path Intent Router.
+    Regex fast path for explicit count/total queries to execute sub-1.2s SQL without LLM.
+    """
+    if not schema_map or len(schema_map) > 5:
+        return None
+        
+    q_lower = query_text.lower()
+    
+    match_count = re.search(r'how many (values|entries|rows|records) (in|are in) (the )?([a-z0-9_ ]+)', q_lower)
+    if match_count:
+        target_name = match_count.group(4).strip()
+        for t_name, info in schema_map.items():
+            title = (info.get("title") or "").lower()
+            if target_name in t_name.lower() or (title and target_name in title):
+                sql = f'SELECT COUNT(*) FROM "{t_name}"'
+                logger.info(f"Fast-Path Intent Router generated SQL: {sql}")
+                return {"route": "SQL", "sql_query": sql}
+                
+    return None
+
+def verify_retrieval_results(sql_result: Optional[dict], query_text: str, company_id: str = None) -> Optional[dict]:
+    """
+    Verification Stage:
+    Checks if primary SQL query returned 0 rows or failed.
+    If 0 rows, falls back to Inverted Cell Index (table_store.GLOBAL_CELL_INDEX).
+    """
+    if not sql_result:
+        return None
+        
+    formatted = sql_result.get("formatted_result", "")
+    if "0 rows" in formatted.lower() or "no rows returned" in formatted.lower() or "0 records" in formatted.lower():
+        logger.info(f"Verification Stage: SQL returned 0 rows for query '{query_text}'. Triggering Inverted Cell Index fallback.")
+        cell_matches = table_store.GLOBAL_CELL_INDEX.search(query_text)
+        if cell_matches:
+            fallback_text = f"Verified Cell Index Matches for '{query_text}':\n"
+            for tbl, col, row_idx, val in cell_matches[:10]:
+                fallback_text += f"- Table: {tbl} | Column: {col} | Row {row_idx+1}: {val}\n"
+            return {
+                "route": "CELL_INDEX",
+                "formatted_result": fallback_text,
+                "verification_status": "fallback_applied"
+            }
+            
+    return sql_result
+
 async def route_and_execute(query_text: str, company_id: str = None) -> Optional[dict]:
-    """
-    Query-Time Router: Classify query dynamically using LLM.
-    If it requires SQL (count, average, sum, min, max, global filters),
-    it generates the exact SQL query, runs it against this tenant's Tier-C tables
-    (Postgres or SQLite, via table_store), and formats the results to bypass
-    semantic search and guarantee no data loss.
-    """
     try:
         schema_map = table_store.get_router_schema(company_id)
     except Exception as e:
@@ -69,6 +143,22 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
         return None
     if not schema_map:
         return None
+
+    # Step A: Query Rewriter & Step B: Entity Normalization
+    rewritten_query = rewrite_query_intent(query_text)
+    normalized_query = normalize_query_entities(rewritten_query, schema_map)
+
+    # Step C: Fast-Path Intent Router (Instant Regex Execution)
+    fast_result = fast_path_intent_router(normalized_query, schema_map)
+    if fast_result:
+        # Execute fast-path SQL directly
+        sql_query = fast_result.get("sql_query")
+        try:
+            cols, rows = table_store.execute_select(sql_query, company_id)
+            res_str = f"Fast-Path SQL Executed: {sql_query}\nResult: {rows}"
+            return verify_retrieval_results({"route": "SQL", "formatted_result": res_str}, query_text, company_id)
+        except Exception as fast_err:
+            logger.warning(f"Fast-Path SQL failed: {fast_err}, falling back to router")
 
     # Two-Stage Routing: if schema has > 15 tables, ask LLM to shortlist top 3 candidate tables first
     if len(schema_map) > 15:

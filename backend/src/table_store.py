@@ -363,6 +363,10 @@ def _sqlite_execute_select(sql: str, company_id: Optional[str]) -> Tuple[List[st
 # Public backend-agnostic API
 # ══════════════════════════════════════════════════════════════════════════════
 def load_tables(tables: List[Tuple[str, pd.DataFrame, str]], company_id: str = None):
+    # Populate inverted cell index for exact lookups
+    for db_table_name, df, title in tables:
+        GLOBAL_CELL_INDEX.build_index(df, db_table_name)
+
     if use_postgres():
         _pg_load(tables, company_id)
     else:
@@ -382,3 +386,53 @@ def get_router_schema(company_id: str = None) -> Dict[str, dict]:
 
 def execute_select(sql: str, company_id: str = None) -> Tuple[List[str], list]:
     return _pg_execute_select(sql, company_id) if use_postgres() else _sqlite_execute_select(sql, company_id)
+
+# ── Analytical Engine Interface & Inverted Cell Index ──
+class AnalyticalEngine:
+    """Database-Agnostic Analytical Engine interface."""
+    def load_tables(self, tables: List[Tuple[str, pd.DataFrame, str]], company_id: str = None):
+        raise NotImplementedError
+
+    def delete_tables_for_file(self, filename: str, company_id: str = None):
+        raise NotImplementedError
+
+    def get_router_schema(self, company_id: str = None) -> Dict[str, dict]:
+        raise NotImplementedError
+
+    def execute_select(self, sql: str, company_id: str = None) -> Tuple[List[str], list]:
+        raise NotImplementedError
+
+class InvertedCellIndex:
+    """
+    Inverted Index for exact cell values (IDs, codes, emails, names).
+    Maps tokens -> List of (db_table_name, col_name, row_idx, cell_value).
+    """
+    def __init__(self):
+        self._index: Dict[str, List[Tuple[str, str, int, str]]] = {}
+
+    def build_index(self, df: pd.DataFrame, db_table_name: str):
+        for row_idx, row in df.iterrows():
+            for col_name, val in row.items():
+                if pd.isna(val):
+                    continue
+                val_str = str(val).strip()
+                if not val_str or len(val_str) < 2:
+                    continue
+                
+                tokens = re.split(r'[\s,._\-/]+', val_str.lower())
+                for t in tokens:
+                    if len(t) >= 2:
+                        if t not in self._index:
+                            self._index[t] = []
+                        if len(self._index[t]) < 100:
+                            self._index[t].append((db_table_name, str(col_name), int(row_idx), val_str))
+
+    def search(self, query: str) -> List[Tuple[str, str, int, str]]:
+        query_tokens = re.split(r'[\s,._\-/]+', query.lower())
+        results = []
+        for t in query_tokens:
+            if t in self._index:
+                results.extend(self._index[t])
+        return results
+
+GLOBAL_CELL_INDEX = InvertedCellIndex()

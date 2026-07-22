@@ -213,6 +213,17 @@ def process_csv_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.Dat
             }
         })
 
+    # Per-file safety cap (same policy as Excel — see process_excel_file).
+    MAX_CHUNKS_PER_FILE = 100
+    if len(chunks) > MAX_CHUNKS_PER_FILE:
+        logger.warning(
+            f"⚠️  CSV {filename}: chunk count {len(chunks)} exceeds cap {MAX_CHUNKS_PER_FILE}. "
+            f"Keeping first {MAX_CHUNKS_PER_FILE}."
+        )
+        summaries = [c for c in chunks if c["metadata"].get("chunk_tier") == "table_summary"]
+        windows   = [c for c in chunks if c["metadata"].get("chunk_tier") != "table_summary"]
+        chunks = (summaries + windows)[:MAX_CHUNKS_PER_FILE]
+
     logger.info(f"CSV {filename}: {nrows} rows → {len(chunks)} vector chunk(s) (SQL table also stored).")
     return chunks, [(db_table_name, df, "")]
 
@@ -613,6 +624,22 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                         "chunk_tier": "markdown_window"
                     }
                 })
+
+    # Per-file safety cap. With the 3-tier adaptive logic (large tables emit 1
+    # summary, medium emit ≤5 windows, small emit ≤4 windows), a normal file should
+    # never approach this limit. If it does, something unexpected happened in table
+    # segmentation and we cap rather than flood Neon with thousands of embeddings.
+    MAX_CHUNKS_PER_FILE = 100
+    if len(chunks) > MAX_CHUNKS_PER_FILE:
+        logger.warning(
+            f"⚠️  Excel {filename}: chunk count {len(chunks)} exceeds cap {MAX_CHUNKS_PER_FILE}. "
+            f"Keeping first {MAX_CHUNKS_PER_FILE} (summary-tier preferred). "
+            f"File has {len(sqlite_tables)} detected table(s) — consider splitting the file."
+        )
+        # Prioritise table_summary chunks over markdown_windows so metadata is preserved.
+        summaries = [c for c in chunks if c["metadata"].get("chunk_tier") == "table_summary"]
+        windows   = [c for c in chunks if c["metadata"].get("chunk_tier") != "table_summary"]
+        chunks = (summaries + windows)[:MAX_CHUNKS_PER_FILE]
 
     logger.info(f"Excel {filename}: {len(sqlite_tables)} table(s) → {len(chunks)} vector chunk(s) (all tables also stored in SQL).")
     return chunks, sqlite_tables

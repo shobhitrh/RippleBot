@@ -924,9 +924,16 @@ class RAGEngine:
         files_to_process = []
 
         # Deleted files (were indexed, now gone from disk).
-        for indexed_path in indexed_files:
-            if indexed_path not in current_files_by_path:
-                files_to_delete.append(indexed_path)
+        # CRITICAL GUARD: Only delete from Neon if physical files still exist on disk
+        # for this tenant. If current_files_by_path is empty (e.g. after a container
+        # redeploy wipes the ephemeral disk), we MUST NOT delete anything — those
+        # vectors in Neon are the only surviving copy of the data.
+        if current_files_by_path:  # Only purge stale entries when disk has at least 1 file
+            for indexed_path in indexed_files:
+                if indexed_path not in current_files_by_path:
+                    files_to_delete.append(indexed_path)
+        else:
+            logger.info("⚠️  No physical files found on disk — skipping stale-file purge to protect Neon data (ephemeral disk may have been wiped on redeploy).")
 
         # New or modified files.
         for f in files:

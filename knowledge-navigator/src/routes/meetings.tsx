@@ -4,8 +4,10 @@ import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Calendar, Clock, Users, RefreshCw, FileText, DownloadCloud } from "lucide-react";
-import { mockMeetings, type Meeting } from "@/lib/mock-data";
+import { type Meeting } from "@/lib/mock-data";
 import { SourceDrawer } from "@/components/source-drawer";
 import { apiFetch, useBackoffPoll } from "@/lib/api";
 import { useCompany } from "@/lib/company";
@@ -16,6 +18,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 export const Route = createFileRoute("/meetings")({
   component: MeetingsPage,
@@ -25,6 +35,12 @@ function MeetingsPage() {
   const [preview, setPreview] = useState<string | null>(null);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [selectedCompany, companies] = useCompany();
+  const [importOpen, setImportOpen] = useState(false);
+  const [importId, setImportId] = useState("");
+  const [importing, setImporting] = useState(false);
+
+  const selectedName =
+    companies.find((c) => c.id === selectedCompany)?.name ?? selectedCompany;
 
   const assign = async (filename: string, target: string) => {
     toast.info(`Assigning meeting to ${target}…`);
@@ -98,14 +114,13 @@ function MeetingsPage() {
   useBackoffPoll(fetchMeetings, { baseMs: 5000, maxMs: 45000 });
 
   const importMeeting = async () => {
-    const id = window.prompt(
-      "Fireflies transcript ID to import into this company:\n(find it in the meeting's Fireflies URL, or via the API)"
-    );
-    if (!id || !id.trim()) return;
-    toast.info(`Importing meeting ${id.trim()} into ${selectedCompany}…`);
+    const id = importId.trim();
+    if (!id) return;
+    setImporting(true);
+    toast.info(`Importing meeting ${id} into ${selectedName}…`);
     try {
       const fd = new FormData();
-      fd.append("meeting_id", id.trim());
+      fd.append("meeting_id", id);
       const res = await apiFetch("/api/documents/import-fireflies", {
         method: "POST",
         body: fd,
@@ -113,12 +128,16 @@ function MeetingsPage() {
       });
       if (res.ok) {
         toast.success("Import started — the meeting will appear once indexed.");
+        setImportOpen(false);
+        setImportId("");
         setTimeout(fetchMeetings, 4000);
       } else {
         toast.error("Import failed");
       }
     } catch {
       toast.error("Backend connection failed");
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -151,7 +170,7 @@ function MeetingsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 self-start shrink-0">
-          <Button size="sm" variant="outline" className="text-xs" onClick={importMeeting}>
+          <Button size="sm" variant="outline" className="text-xs" onClick={() => setImportOpen(true)}>
             <DownloadCloud className="h-3.5 w-3.5" />
             Import by ID
           </Button>
@@ -225,6 +244,50 @@ function MeetingsPage() {
         onOpenChange={(o) => !o && setPreview(null)}
         file={preview}
       />
+
+      <Dialog
+        open={importOpen}
+        onOpenChange={(o) => {
+          setImportOpen(o);
+          if (!o) setImportId("");
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <DownloadCloud className="h-4 w-4 text-accent" />
+              Import Fireflies meeting
+            </DialogTitle>
+            <DialogDescription>
+              Paste a Fireflies transcript ID to import it into{" "}
+              <span className="font-medium text-foreground">{selectedName}</span>. Find
+              the ID in the meeting's Fireflies URL.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-2 py-1">
+            <Label htmlFor="meeting-id">Transcript ID</Label>
+            <Input
+              id="meeting-id"
+              value={importId}
+              onChange={(e) => setImportId(e.target.value)}
+              placeholder="01KX5A8FFPNQ5QAE97G4SGPQQE"
+              autoFocus
+              className="font-mono text-sm"
+              onKeyDown={(e) => e.key === "Enter" && importId.trim() && importMeeting()}
+            />
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setImportOpen(false)} disabled={importing}>
+              Cancel
+            </Button>
+            <Button onClick={importMeeting} disabled={importing || !importId.trim()}>
+              {importing ? "Importing…" : "Import meeting"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

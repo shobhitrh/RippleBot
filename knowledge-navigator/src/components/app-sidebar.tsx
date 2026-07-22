@@ -4,6 +4,7 @@ import {
   MessageSquare,
   FolderTree,
   Radio,
+  Building2,
   Sparkles,
 } from "lucide-react";
 import {
@@ -23,6 +24,7 @@ const items = [
   { title: "Chatbot Assistant", url: "/chat", icon: MessageSquare },
   { title: "Knowledge Base", url: "/knowledge", icon: FolderTree },
   { title: "Meeting Logs", url: "/meetings", icon: Radio },
+  { title: "Company Settings", url: "/settings", icon: Building2 },
 ];
 
 export function AppSidebar() {

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Building2, Plus } from "lucide-react";
 import {
   Select,
@@ -6,7 +7,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useCompany, setSelectedCompany, addCompany } from "@/lib/company";
+import { useCompany, setSelectedCompany } from "@/lib/company";
+import { AddCompanyDialog } from "@/components/add-company-dialog";
 
 const ADD_NEW = "__add_new__";
 
@@ -17,43 +19,41 @@ const ADD_NEW = "__add_new__";
  */
 export function CompanySelector() {
   const [selected, companies] = useCompany();
+  const [addOpen, setAddOpen] = useState(false);
 
   const onChange = (value: string) => {
     if (value === ADD_NEW) {
-      const name = window.prompt("New company name:");
-      if (!name || !name.trim()) return;
-      // Optional email domain → enables Fireflies auto-routing for this company.
-      const domain = window.prompt(
-        `Email domain for "${name.trim()}" (optional, e.g. acme.com)\nUsed to auto-route Fireflies meetings to this company.`,
-        ""
-      );
-      addCompany(name.trim(), (domain || "").trim() || undefined);
+      setAddOpen(true);
       return;
     }
     setSelectedCompany(value);
   };
 
   return (
-    <Select value={selected} onValueChange={onChange}>
-      <SelectTrigger
-        className="h-9 w-[105px] xs:w-[125px] sm:w-[190px] gap-1 sm:gap-2 border-border/70 bg-card text-xs sm:text-sm px-2 sm:px-3 shrink-0"
-        aria-label="Select company"
-      >
-        <Building2 className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0 text-accent" />
-        <SelectValue placeholder="Select company" />
-      </SelectTrigger>
-      <SelectContent>
-        {companies.map((c) => (
-          <SelectItem key={c.id} value={c.id}>
-            {c.name}
+    <>
+      <Select value={selected} onValueChange={onChange}>
+        <SelectTrigger
+          className="h-9 w-[105px] xs:w-[125px] sm:w-[190px] gap-1 sm:gap-2 border-border/70 bg-card text-xs sm:text-sm px-2 sm:px-3 shrink-0"
+          aria-label="Select company"
+        >
+          <Building2 className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0 text-accent" />
+          <SelectValue placeholder="Select company" />
+        </SelectTrigger>
+        <SelectContent>
+          {companies.map((c) => (
+            <SelectItem key={c.id} value={c.id}>
+              {c.name}
+            </SelectItem>
+          ))}
+          <SelectItem value={ADD_NEW} className="text-accent">
+            <span className="flex items-center gap-1.5">
+              <Plus className="h-3.5 w-3.5" /> Add company…
+            </span>
           </SelectItem>
-        ))}
-        <SelectItem value={ADD_NEW} className="text-accent">
-          <span className="flex items-center gap-1.5">
-            <Plus className="h-3.5 w-3.5" /> Add company…
-          </span>
-        </SelectItem>
-      </SelectContent>
-    </Select>
+        </SelectContent>
+      </Select>
+
+      <AddCompanyDialog open={addOpen} onOpenChange={setAddOpen} />
+    </>
   );
 }

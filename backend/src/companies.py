@@ -78,6 +78,31 @@ def add_company(name: str, domains=None) -> dict:
         return record
 
 
+def update_company(company_id: str, name=None, domains=None):
+    """
+    Edit an existing company's settings from the UI. The id is immutable (it keys
+    all stored data + the X-Company-Id header); only the display name and domain
+    list can change. `domains` REPLACES the list (so removing a domain works),
+    unlike add_company which merges. Returns the updated record, or None if the
+    company doesn't exist.
+    """
+    cid = config.normalize_company_id(company_id)
+    with _lock:
+        companies = _load_raw()
+        for c in companies:
+            if c.get("id") == cid:
+                if name is not None and str(name).strip():
+                    c["name"] = str(name).strip()
+                if domains is not None:
+                    c["domains"] = sorted(
+                        {d.strip().lower().lstrip("@") for d in domains if d and d.strip()}
+                    )
+                _save_raw(companies)
+                logger.info(f"Updated company '{cid}' (domains={c.get('domains')})")
+                return c
+    return None
+
+
 def company_name(company_id: str) -> str:
     """Human-readable display name for a company id (falls back to the id)."""
     if not company_id:

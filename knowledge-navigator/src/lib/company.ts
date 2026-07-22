@@ -62,12 +62,12 @@ export async function refreshCompanies(): Promise<void> {
   }
 }
 
-export async function addCompany(name: string, domain?: string): Promise<void> {
+export async function addCompany(name: string, domains: string[] = []): Promise<void> {
   try {
     await fetch(`${API_BASE}/api/companies`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, domains: domain ? [domain] : [] }),
+      body: JSON.stringify({ name, domains }),
     });
   } catch {
     /* ignore; refresh will reflect server state */
@@ -76,6 +76,25 @@ export async function addCompany(name: string, domain?: string): Promise<void> {
   // select the newly-created company
   const id = name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^[_-]+|[_-]+$/g, "");
   if (id) setSelectedCompany(id);
+}
+
+/** Update an existing company's settings (name and/or domain map). */
+export async function updateCompany(
+  id: string,
+  patch: { name?: string; domains?: string[] }
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/api/companies/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    await refreshCompanies();
+    return res.ok;
+  } catch {
+    await refreshCompanies();
+    return false;
+  }
 }
 
 // ── React binding ────────────────────────────────────────────────────────────

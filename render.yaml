@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: ripplebot-backend
+    env: python
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.src.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: VECTOR_BACKEND
+        value: pgvector
+      - key: POSTGRES_URI
+        sync: false
+      - key: VOYAGE_API_KEY2
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        value: "*"

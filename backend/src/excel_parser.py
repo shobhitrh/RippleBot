@@ -175,39 +175,45 @@ def process_csv_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.Dat
         }
     })
 
-    # For small CSV files (<= 50 rows), include row markdown chunks for extra context
-    if len(df) <= 50:
+    # Smart windowing: scale window chunks based on table size.
+    # Large files (>500 rows): summary only — SQL handles all lookups.
+    # Medium files (51-500 rows): summary + up to 5 sampled windows for context.
+    # Small files (<=50 rows): summary + all row windows (at most ceil(50/15)=4 extra chunks).
+    nrows = len(df)
+    if nrows <= 50:
         window_size = 15
-        for i in range(0, len(df), window_size):
-            window_df = df.iloc[i:i+window_size].fillna("")
-            window_df = window_df.copy()
-            for col in window_df.columns:
-                if window_df[col].dtype == object:
-                    window_df[col] = window_df[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', '', regex=False)
-            md_table = window_df.to_markdown(index=False)
-            chunk_text = f"## File: {filename} (Rows {i+1}-{min(i+window_size, len(df))})\n\n{md_table}"
-            chunks.append({
-                "text": chunk_text,
-                "metadata": {
-                    "source": file_path,
-                    "source_name": filename,
-                    "source_file": filename,
-                    "type": "csv",
-                    "sheet_name": "default",
-                    "table_id": db_table_name,
-                    "row_range": [i + 1, min(i + window_size, len(df))],
-                    "columns": list(df.columns),
-                    "column_dtypes": dtypes_dict,
-                    "chunk_tier": "markdown_window"
-                }
-            })
-            
-    # Hard safety guard: A CSV file should NEVER emit more than 20 vector chunks.
-    MAX_EXCEL_CHUNKS = 20
-    if len(chunks) > MAX_EXCEL_CHUNKS:
-        logger.warning(f"Cap safety triggered for CSV {filename}: capped {len(chunks)} chunks to {MAX_EXCEL_CHUNKS}.")
-        chunks = chunks[:MAX_EXCEL_CHUNKS]
+        windows_to_emit = list(range(0, nrows, window_size))
+    elif nrows <= 500:
+        window_size = max(nrows // 5, 15)
+        windows_to_emit = list(range(0, nrows, window_size))[:5]
+    else:
+        windows_to_emit = []  # Summary chunk only — SQL router answers specific queries
 
+    for i in windows_to_emit:
+        window_df = df.iloc[i:i+window_size].fillna("")
+        window_df = window_df.copy()
+        for col in window_df.columns:
+            if window_df[col].dtype == object:
+                window_df[col] = window_df[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', '', regex=False)
+        md_table = window_df.to_markdown(index=False)
+        chunk_text = f"## File: {filename} (Rows {i+1}-{min(i+window_size, nrows)})\n\n{md_table}"
+        chunks.append({
+            "text": chunk_text,
+            "metadata": {
+                "source": file_path,
+                "source_name": filename,
+                "source_file": filename,
+                "type": "csv",
+                "sheet_name": "default",
+                "table_id": db_table_name,
+                "row_range": [i + 1, min(i + window_size, nrows)],
+                "columns": list(df.columns),
+                "column_dtypes": dtypes_dict,
+                "chunk_tier": "markdown_window"
+            }
+        })
+
+    logger.info(f"CSV {filename}: {nrows} rows → {len(chunks)} vector chunk(s) (SQL table also stored).")
     return chunks, [(db_table_name, df, "")]
 
 def is_key_value_block(df: pd.DataFrame) -> bool:
@@ -567,42 +573,48 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                 }
             })
 
-            # For small tables (<= 50 rows), include row markdown chunks for extra context
-            if len(df) <= 50:
+            # Smart windowing: scale window chunks based on table size.
+            # Large tables (>500 rows): summary only — SQL handles all lookups.
+            # Medium tables (51-500 rows): summary + up to 5 sampled windows for context.
+            # Small tables (<=50 rows): summary + all row windows (at most ceil(50/15)=4 extra chunks).
+            nrows = len(df)
+            if nrows <= 50:
                 window_size = 15
-                for i in range(0, len(df), window_size):
-                    window_df = df.iloc[i:i+window_size].fillna("")
-                    window_df = window_df.copy()
-                    for col in window_df.columns:
-                        if window_df[col].dtype == object:
-                            window_df[col] = window_df[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', '', regex=False)
-                    md_table = window_df.to_markdown(index=False)
-                    title_hdr = f" (Title: {table_title})" if table_title else ""
-                    chunk_text = f"## Sheet: {sheet_name}{title_hdr} (Table: {table_id}, Rows {min_r + data_start_row + i + 1}-{min_r + data_start_row + min(i+window_size, len(df)) + 1})\n\n{md_table}"
-                    chunks.append({
-                        "text": chunk_text,
-                        "metadata": {
-                            "source": file_path,
-                            "source_name": filename,
-                            "source_file": filename,
-                            "type": "excel",
-                            "sheet_name": sheet_name,
-                            "table_id": table_id,
-                            "row_range": [min_r + data_start_row + i + 1, min_r + data_start_row + min(i+window_size, len(df)) + 1],
-                            "columns": final_columns,
-                            "column_dtypes": dtypes_dict,
-                            "value_source": "cached",
-                            "excluded_hidden_rows": excluded_hidden_rows,
-                            "chunk_tier": "markdown_window"
-                        }
-                    })
-                    
-    # Hard safety guard: An Excel file should NEVER emit more than 20 vector chunks total.
-    MAX_EXCEL_CHUNKS = 20
-    if len(chunks) > MAX_EXCEL_CHUNKS:
-        logger.warning(f"Cap safety triggered for Excel {filename}: capped {len(chunks)} chunks down to {MAX_EXCEL_CHUNKS}.")
-        chunks = chunks[:MAX_EXCEL_CHUNKS]
+                windows_to_emit = list(range(0, nrows, window_size))
+            elif nrows <= 500:
+                window_size = max(nrows // 5, 15)
+                windows_to_emit = list(range(0, nrows, window_size))[:5]
+            else:
+                windows_to_emit = []  # Summary chunk only — SQL router handles specific queries
 
+            for i in windows_to_emit:
+                window_df = df.iloc[i:i+window_size].fillna("")
+                window_df = window_df.copy()
+                for col in window_df.columns:
+                    if window_df[col].dtype == object:
+                        window_df[col] = window_df[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', '', regex=False)
+                md_table = window_df.to_markdown(index=False)
+                title_hdr = f" (Title: {table_title})" if table_title else ""
+                chunk_text = f"## Sheet: {sheet_name}{title_hdr} (Table: {table_id}, Rows {min_r + data_start_row + i + 1}-{min_r + data_start_row + min(i+window_size, nrows) + 1})\n\n{md_table}"
+                chunks.append({
+                    "text": chunk_text,
+                    "metadata": {
+                        "source": file_path,
+                        "source_name": filename,
+                        "source_file": filename,
+                        "type": "excel",
+                        "sheet_name": sheet_name,
+                        "table_id": table_id,
+                        "row_range": [min_r + data_start_row + i + 1, min_r + data_start_row + min(i+window_size, nrows) + 1],
+                        "columns": final_columns,
+                        "column_dtypes": dtypes_dict,
+                        "value_source": "cached",
+                        "excluded_hidden_rows": excluded_hidden_rows,
+                        "chunk_tier": "markdown_window"
+                    }
+                })
+
+    logger.info(f"Excel {filename}: {len(sqlite_tables)} table(s) → {len(chunks)} vector chunk(s) (all tables also stored in SQL).")
     return chunks, sqlite_tables
 
 def load_tables_to_sqlite(sqlite_tables: List[Tuple[str, pd.DataFrame, str]], company_id: str = None):

@@ -16,60 +16,38 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 CompanyId = Header(default=config.DEFAULT_COMPANY_ID, alias="X-Company-Id")
 
 
-@router.post("/upload")
-async def upload_document(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    department: Optional[str] = Form(None),
-    uploaded_by: Optional[str] = Form(None),
-    category: Optional[str] = Form(None),
-    company_id: str = CompanyId,
-):
+def _save_and_tag_file(file: UploadFile, metadata: dict, docs_dir: str) -> str:
     """
-    Accept multipart/form-data upload, save it to the company's knowledge_base
-    subfolder, and attach metadata via frontmatter (text) or sidecar JSON (binary).
+    Save one uploaded file into docs_dir and attach metadata (frontmatter for
+    text, sidecar JSON for binary). Returns the sanitized filename. Raises on
+    failure (and cleans up a partially-written file) so the caller can decide
+    whether to abort (single upload) or skip-and-continue (batch upload).
     """
-    company_id = config.normalize_company_id(company_id)
-    docs_dir = config.company_documents_dir(company_id)
-    filename = file.filename
-    # Sanitize filename
-    safe_filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
-    safe_filename = re.sub(r'\s+', '_', safe_filename).strip("_")
-
+    safe_filename = re.sub(r'[\\/*?:"<>|]', "_", file.filename or "unnamed")
+    safe_filename = re.sub(r'\s+', '_', safe_filename).strip("_") or "unnamed"
     file_path = os.path.join(docs_dir, safe_filename)
-    
-    # Save the file
+
+    # Save the raw bytes.
     try:
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         logger.info(f"Saved uploaded file to {file_path}")
     except Exception as e:
-        logger.error(f"Failed to save uploaded file: {e}")
-        raise HTTPException(status_code=500, detail=f"Could not save file: {str(e)}")
+        logger.error(f"Failed to save uploaded file '{safe_filename}': {e}")
+        raise
 
-    # Construct metadata
-    metadata = {
-        "department": department or "General",
-        "uploaded_by": uploaded_by or "System",
-        "category": category or "Document",
-        "uploaded_at": datetime.utcnow().isoformat()
-    }
-
+    # Attach metadata.
     _, ext = os.path.splitext(safe_filename)
     is_text = ext.lower() in [".md", ".txt"]
-
     try:
         if is_text:
-            # For text files, read content and prepend frontmatter
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
-            
-            # If it already has frontmatter, we strip it first to avoid double frontmatter
+            # Strip any existing frontmatter to avoid doubling it.
             content_clean = content
             match = re.match(r'^---\s*\n.*?\n---\s*\n', content, re.DOTALL)
             if match:
                 content_clean = content[match.end():]
-                
             frontmatter = f"""---
 department: {metadata['department']}
 uploaded_by: {metadata['uploaded_by']}
@@ -82,39 +60,113 @@ uploaded_at: {metadata['uploaded_at']}
                 f.write(frontmatter + content_clean)
             logger.info(f"Prepended frontmatter metadata to text document: {file_path}")
         else:
-            # For binary files, save a sidecar metadata JSON file
             sidecar_path = file_path + ".metadata.json"
             with open(sidecar_path, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2)
             logger.info(f"Created sidecar metadata JSON: {sidecar_path}")
-            
     except Exception as e:
-        logger.error(f"Failed to append metadata to file: {e}")
-        # Clean up file on failure
+        logger.error(f"Failed to attach metadata to '{safe_filename}': {e}")
         if os.path.exists(file_path):
             os.remove(file_path)
-        raise HTTPException(status_code=500, detail=f"Failed to add metadata: {str(e)}")
+        raise
 
-    # Watcher will pick this up automatically, but we can also manually kick off a build task
-    # to guarantee fast feedback loop
-    def run_indexer():
-        try:
-            engine = get_engine(company_id, required=False)
-            if engine is None:
-                logger.warning("Skipping index build — vector store is unavailable.")
-                return
-            logger.info(f"Triggering direct index from upload for: {safe_filename} (tenant={company_id})")
-            engine.build_index(force_rebuild=False)
-        except Exception as e:
-            logger.error(f"Manual index build trigger failed: {e}")
-            
-    background_tasks.add_task(run_indexer)
+    return safe_filename
+
+
+def _trigger_index(company_id: str, label: str = ""):
+    """Kick off an incremental index build for a tenant. Idempotent and locked
+    inside the engine, so it's safe to call once after a batch of saves."""
+    try:
+        engine = get_engine(company_id, required=False)
+        if engine is None:
+            logger.warning("Skipping index build — vector store is unavailable.")
+            return
+        logger.info(f"Triggering index build (tenant={company_id}){' for ' + label if label else ''}")
+        engine.build_index(force_rebuild=False)
+    except Exception as e:
+        logger.error(f"Index build trigger failed: {e}")
+
+
+@router.post("/upload")
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    department: Optional[str] = Form(None),
+    uploaded_by: Optional[str] = Form(None),
+    category: Optional[str] = Form(None),
+    company_id: str = CompanyId,
+):
+    """
+    Accept a single multipart/form-data upload, save it to the company's
+    knowledge_base subfolder, attach metadata, and trigger indexing.
+    """
+    company_id = config.normalize_company_id(company_id)
+    docs_dir = config.company_documents_dir(company_id)
+    metadata = {
+        "department": department or "General",
+        "uploaded_by": uploaded_by or "System",
+        "category": category or "Document",
+        "uploaded_at": datetime.utcnow().isoformat(),
+    }
+    try:
+        safe_filename = _save_and_tag_file(file, metadata, docs_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not save file: {str(e)}")
+
+    background_tasks.add_task(_trigger_index, company_id, safe_filename)
 
     return {
         "status": "success",
         "message": f"Document '{safe_filename}' uploaded successfully. Indexing started.",
         "filename": safe_filename,
-        "metadata": metadata
+        "metadata": metadata,
+    }
+
+
+@router.post("/upload-batch")
+async def upload_documents(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    department: Optional[str] = Form(None),
+    uploaded_by: Optional[str] = Form(None),
+    category: Optional[str] = Form(None),
+    company_id: str = CompanyId,
+):
+    """
+    Ingest MANY files in one request. Each file is saved independently — a single
+    bad file is skipped and reported rather than failing the whole batch — and the
+    index is rebuilt exactly once after all saves (not once per file).
+    """
+    company_id = config.normalize_company_id(company_id)
+    docs_dir = config.company_documents_dir(company_id)
+    metadata = {
+        "department": department or "General",
+        "uploaded_by": uploaded_by or "System",
+        "category": category or "Document",
+        "uploaded_at": datetime.utcnow().isoformat(),
+    }
+
+    saved: List[str] = []
+    failed: List[dict] = []
+    for f in files:
+        try:
+            saved.append(_save_and_tag_file(f, dict(metadata), docs_dir))
+        except Exception as e:
+            failed.append({"filename": f.filename, "error": str(e)})
+
+    # One index pass for the whole batch (only if anything landed).
+    if saved:
+        background_tasks.add_task(_trigger_index, company_id, f"{len(saved)} file(s)")
+
+    return {
+        "status": "success" if not failed else ("partial" if saved else "error"),
+        "message": (
+            f"{len(saved)} file(s) uploaded successfully. Indexing started."
+            + (f" {len(failed)} failed." if failed else "")
+        ),
+        "saved": saved,
+        "failed": failed,
+        "metadata": metadata,
     }
 
 @router.post("/import-fireflies")

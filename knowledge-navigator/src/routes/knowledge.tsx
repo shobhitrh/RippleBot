@@ -8,6 +8,7 @@ import {
   Trash2,
   Download,
   Zap,
+  X,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -47,10 +48,10 @@ export const Route = createFileRoute("/knowledge")({
 function KnowledgePage() {
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
   const [dragActive, setDragActive] = useState(false);
-  const [pending, setPending] = useState<File | null>(null);
+  const [pending, setPending] = useState<File[]>([]);
   const [dept, setDept] = useState("Engineering");
   const [category, setCategory] = useState<KnowledgeFile["category"]>("Policy");
-  const [syncingFile, setSyncingFile] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const refreshFiles = useCallback(async () => {
     try {
@@ -89,39 +90,76 @@ function KnowledgePage() {
 
   const handleFiles = useCallback((list: FileList | null) => {
     if (!list || list.length === 0) return;
-    setPending(list[0]);
+    const incoming = Array.from(list);
+    // Append to the batch, de-duping by name+size so re-dropping doesn't double up.
+    setPending((cur) => {
+      const seen = new Set(cur.map((f) => `${f.name}:${f.size}`));
+      const merged = [...cur];
+      for (const f of incoming) {
+        const key = `${f.name}:${f.size}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(f);
+        }
+      }
+      return merged;
+    });
   }, []);
 
+  const removePending = (name: string, size: number) =>
+    setPending((cur) => cur.filter((f) => !(f.name === name && f.size === size)));
+
   const commitUpload = async () => {
-    if (!pending) return;
-    setSyncingFile(pending.name);
-    
+    if (pending.length === 0) return;
+    const batch = pending;
+    setUploading(true);
+
     const formData = new FormData();
-    formData.append("file", pending);
+    for (const f of batch) formData.append("files", f);
     formData.append("department", dept);
     formData.append("category", category || "Policy");
     formData.append("uploaded_by", "User");
-    
-    toast.info(`Uploading ${pending.name} to knowledge base...`);
-    setPending(null);
-    
+
+    // Scale the timeout to the payload — many/large files need longer than a
+    // single small upload. ~4s per MB on top of a 60s floor, capped at 10 min.
+    const totalBytes = batch.reduce((n, f) => n + f.size, 0);
+    const timeoutMs = Math.min(600000, 60000 + Math.round((totalBytes / (1024 * 1024)) * 4000));
+
+    toast.info(
+      batch.length === 1
+        ? `Uploading ${batch[0].name}…`
+        : `Uploading ${batch.length} files to the knowledge base…`
+    );
+
     try {
-      const response = await apiFetch("/api/documents/upload", {
+      const response = await apiFetch("/api/documents/upload-batch", {
         method: "POST",
         body: formData,
-        timeoutMs: 60000,
+        timeoutMs,
       });
       if (response.ok) {
-        toast.success("Document uploaded successfully. Indexing started.");
+        const data = await response.json().catch(() => ({}));
+        const savedN = data?.saved?.length ?? batch.length;
+        const failedN = data?.failed?.length ?? 0;
+        if (failedN > 0) {
+          toast.warning(
+            `${savedN} file(s) ingested, ${failedN} failed: ${data.failed
+              .map((x: any) => x.filename)
+              .join(", ")}`
+          );
+        } else {
+          toast.success(`${savedN} file(s) uploaded. Indexing started.`);
+        }
+        setPending([]);
         await refreshFiles();
       } else {
-        const err = await response.json();
+        const err = await response.json().catch(() => ({}));
         toast.error(`Upload failed: ${err.detail || response.statusText}`);
       }
     } catch (e) {
       toast.error("Connection to backend failed");
     } finally {
-      setSyncingFile(null);
+      setUploading(false);
     }
   };
 
@@ -216,13 +254,17 @@ function KnowledgePage() {
                 Drop files here, or <span className="text-accent">browse</span>
               </div>
               <div className="text-[11px] sm:text-xs text-muted-foreground">
-                PDF, Excel (.xlsx, .xls), Markdown, DOCX, TXT - up to 20 MB
+                PDF, Excel (.xlsx, .xls), Markdown, DOCX, TXT — select multiple, up to 20 MB each
               </div>
               <input
                 type="file"
+                multiple
                 className="hidden"
                 accept=".pdf,.md,.docx,.txt,.xlsx,.xls"
-                onChange={(e) => handleFiles(e.target.files)}
+                onChange={(e) => {
+                  handleFiles(e.target.files);
+                  e.target.value = ""; // allow re-selecting the same file(s)
+                }}
               />
             </label>
           </CardContent>
@@ -339,16 +381,42 @@ function KnowledgePage() {
         </CardContent>
       </Card>
 
-      <Dialog open={!!pending} onOpenChange={(o) => !o && setPending(null)}>
+      <Dialog open={pending.length > 0} onOpenChange={(o) => !o && !uploading && setPending([])}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Tag and ingest</DialogTitle>
+            <DialogTitle>
+              Tag and ingest{pending.length > 1 ? ` (${pending.length} files)` : ""}
+            </DialogTitle>
             <DialogDescription>
-              Add metadata before pushing <span className="font-medium">{pending?.name}</span> to
-              the knowledge base.
+              These tags apply to{" "}
+              <span className="font-medium">
+                {pending.length === 1 ? "this file" : `all ${pending.length} files`}
+              </span>
+              . They'll be ingested together and indexed in one pass.
             </DialogDescription>
           </DialogHeader>
+
           <div className="grid gap-4">
+            <div className="max-h-44 overflow-y-auto rounded-md border divide-y">
+              {pending.map((f) => (
+                <div key={`${f.name}:${f.size}`} className="flex items-center gap-2 px-3 py-2">
+                  <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 flex-1 truncate text-sm">{f.name}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">{formatBytes(f.size)}</span>
+                  {!uploading && (
+                    <button
+                      type="button"
+                      onClick={() => removePending(f.name, f.size)}
+                      className="shrink-0 rounded-sm opacity-60 hover:opacity-100"
+                      aria-label={`Remove ${f.name}`}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
             <div className="grid gap-2">
               <Label>Department / Project</Label>
               <Input value={dept} onChange={(e) => setDept(e.target.value)} />
@@ -372,19 +440,29 @@ function KnowledgePage() {
               </Select>
             </div>
           </div>
+
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setPending(null)}>
+            <Button variant="ghost" onClick={() => setPending([])} disabled={uploading}>
               Cancel
             </Button>
-            <Button onClick={commitUpload}>
+            <Button onClick={commitUpload} disabled={uploading || pending.length === 0}>
               <Zap className="h-4 w-4" />
-              Ingest
+              {uploading
+                ? "Ingesting…"
+                : pending.length > 1
+                ? `Ingest ${pending.length} files`
+                : "Ingest"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
   );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
 function StatusBadge({ status }: { status: KnowledgeFile["status"] }) {

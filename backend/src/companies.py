@@ -78,6 +78,17 @@ def add_company(name: str, domains=None) -> dict:
         return record
 
 
+def company_name(company_id: str) -> str:
+    """Human-readable display name for a company id (falls back to the id)."""
+    if not company_id:
+        return "this customer"
+    cid = config.normalize_company_id(company_id)
+    for c in _load_raw():
+        if c.get("id") == cid:
+            return c.get("name") or cid
+    return cid
+
+
 def company_for_domain(domain: str):
     """Return the company id whose domains include this email domain, or None."""
     if not domain:

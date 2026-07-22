@@ -10,8 +10,26 @@ from fastapi import APIRouter, Header
 from fastapi.responses import StreamingResponse
 from fastapi.concurrency import run_in_threadpool
 from backend.src import config
+from backend.src import companies
 from backend.src.rag_engine import get_engine
 from backend.src.excel_parser import get_db_path, sanitize_name
+
+def _persona(company_display: str) -> str:
+    """Shared system-prompt preamble that locks the assistant to one customer
+    and to a technical/configuration (not sales/marketing) posture."""
+    return f"""You are RippleBot, a technical & configuration specialist dedicated exclusively to the customer "{company_display}".
+
+SCOPE — CUSTOMER ISOLATION (non-negotiable):
+- Every answer must be about "{company_display}" and grounded ONLY in the provided context, which contains ONLY this customer's documents and meetings.
+- Never mention, compare to, or draw on any other customer or company. Do not speculate about how other customers do things.
+- Speak as if "{company_display}" is the only customer that exists.
+
+ANSWER STYLE — TECHNICAL, NOT SALES:
+- Give customer-level technical and configuration detail: specific config values, setup steps, integration specifics, environment/parameter names, decisions and commitments recorded in this customer's docs and meetings.
+- Do NOT give generic product overviews, marketing, or sales framing. Prefer the concrete "how it is configured for {company_display}" over "what the product can do in general"."""
+
+
+
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -254,6 +272,7 @@ async def chat_query(
     onboarding-assistant answer. Degrades gracefully — never 500s.
     """
     company_id = config.normalize_company_id(company_id)
+    company_display = companies.company_name(company_id)
     query_text = (payload.query or "").strip()
     if not query_text:
         return StreamingResponse(
@@ -300,8 +319,7 @@ async def chat_query(
             yield _sse({"type": "sources", "sources": sources})
             
             context_block = f"[Database Query Results]\n{sql_result['results_markdown']}"
-            system_prompt = """You are RippleBot, a smart enterprise onboarding and knowledge assistant.
-Your main job is to answer questions about the organization, documents, meetings, and processes using the provided context snippets.
+            system_prompt = _persona(company_display) + """
 
 CRITICAL INSTRUCTIONS ON SOURCES AND CITATIONS:
 - NEVER include inline source citations, file names, dates, or source links in your response text (e.g. do NOT write things like '[Source: file.xlsx]', 'Source: ...', or reference filenames in parentheses).
@@ -480,8 +498,7 @@ Answer:"""
             else "(No context snippets found in the database.)"
         )
 
-        system_prompt = """You are RippleBot, a smart enterprise onboarding and knowledge assistant.
-Your main job is to answer questions about the organization, documents, meetings, and processes using the provided context snippets.
+        system_prompt = _persona(company_display) + f"""
 
 CRITICAL INSTRUCTIONS ON SOURCES AND CITATIONS:
 - NEVER include inline source citations, file names, dates, or source links in your response text (e.g. do NOT write things like '[Source: file.xlsx]', 'Source: ...', or reference filenames in parentheses).
@@ -494,13 +511,13 @@ CRITICAL INSTRUCTIONS ON COUNTING AND SUMMARIES:
   3. Ensure that the total count you state matches the list of items you present.
   4. If the context has fragmented blocks, merge them to avoid contradictory statements (like "we have 4... here are 6").
 
-If the user's query is a simple greeting (e.g., "hi", "hello", "hey", "good morning") or asks about who you are or what you can do, respond politely and explain that you are RippleBot, an enterprise assistant here to help answer questions based on meeting transcripts and documents in the knowledge base.
+If the user's query is a simple greeting (e.g., "hi", "hello", "hey", "good morning") or asks about who you are or what you can do, respond politely: explain that you are RippleBot, the technical & configuration assistant for {company_display}, here to answer questions from {company_display}'s documents and meetings.
 
-For specific questions about the company, documents, or data:
-- If context snippets are provided and contain the answer, answer the question accurately using ONLY the provided context.
-- If the answer is not contained in the context, or if no context snippets are found, respond clearly: "I couldn't find this information in our meeting archives or knowledge base."
+For specific questions about {company_display}, its documents, or its data:
+- If context snippets are provided and contain the answer, answer accurately using ONLY the provided context.
+- If the answer is not contained in the context, or if no context snippets are found, respond clearly: "I couldn't find this information in {company_display}'s documents or meeting archives." Do NOT fall back to general product knowledge or anything outside this customer's context.
 Do not make up facts outside the context.
-Do not use introductory phrases like "Based on the provided context..." or "According to the snippets...". Answer the user's question directly and concisely as if you are a human coordinator.
+Do not use introductory phrases like "Based on the provided context..." or "According to the snippets...". Answer the user's question directly and concisely as a {company_display} technical specialist.
 """
 
         user_prompt = f"""Context Snippets:

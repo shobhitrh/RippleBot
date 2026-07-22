@@ -148,45 +148,35 @@ def process_csv_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.Dat
     
     db_table_name = sanitize_name(f"{filename}_default_table")
     chunks = []
-    
-    # ── Tier A: Row-Level JSON ──────────────────────────
     dtypes_dict = {col: str(dtype) for col, dtype in df.dtypes.items()}
-    for idx, row in df.iterrows():
-        row_dict = {}
-        for col in df.columns:
-            val = row[col]
-            row_dict[col] = to_json_serializable(val)
-                
-        row_json = json.dumps({
-            "file": filename,
-            "sheet": "default",
-            "table": "table_1",
-            "row": int(idx) + 1,
-            **row_dict
-        }, separators=(',', ':'))
-        
-        chunks.append({
-            "text": row_json,
-            "metadata": {
-                "source": file_path,
-                "source_name": filename,
-                "source_file": filename,
-                "type": "excel",
-                "sheet_name": "default",
-                "table_id": "table_1",
-                "row_range": [int(idx) + 1, int(idx) + 1],
-                "columns": list(df.columns),
-                "column_dtypes": dtypes_dict,
-                "value_source": "cached",
-                "excluded_hidden_rows": 0,
-                "chunk_tier": "row_json",
-                "is_summary_row": False,
-                "is_flagged": False
-            }
-        })
-        
-    # ── Tier B: Row-Group Markdown ──────────────────────
-    if len(df) < 5000:
+    
+    # ── Table Summary Chunk for Vector Search ──
+    preview_df = df.head(5).fillna("")
+    preview_md = preview_df.to_markdown(index=False)
+    summary_text = (
+        f"## Table: {filename} (SQL Table Name: {db_table_name})\n"
+        f"Total Rows: {len(df)}\n"
+        f"Columns ({len(df.columns)}): {', '.join(df.columns)}\n\n"
+        f"### Sample Rows Preview:\n{preview_md}"
+    )
+    chunks.append({
+        "text": summary_text,
+        "metadata": {
+            "source": file_path,
+            "source_name": filename,
+            "source_file": filename,
+            "type": "csv",
+            "sheet_name": "default",
+            "table_id": db_table_name,
+            "row_range": [1, len(df)],
+            "columns": list(df.columns),
+            "column_dtypes": dtypes_dict,
+            "chunk_tier": "table_summary",
+        }
+    })
+
+    # For small CSV files (<= 50 rows), include row markdown chunks for extra context
+    if len(df) <= 50:
         window_size = 15
         for i in range(0, len(df), window_size):
             window_df = df.iloc[i:i+window_size].fillna("")
@@ -202,14 +192,12 @@ def process_csv_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.Dat
                     "source": file_path,
                     "source_name": filename,
                     "source_file": filename,
-                    "type": "excel",
+                    "type": "csv",
                     "sheet_name": "default",
-                    "table_id": "table_1",
+                    "table_id": db_table_name,
                     "row_range": [i + 1, min(i + window_size, len(df))],
                     "columns": list(df.columns),
                     "column_dtypes": dtypes_dict,
-                    "value_source": "cached",
-                    "excluded_hidden_rows": 0,
                     "chunk_tier": "markdown_window"
                 }
             })
@@ -547,46 +535,34 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
             
             dtypes_dict = {col: str(dtype) for col, dtype in df.dtypes.items()}
             
-            # ── Tier A Serialization: Row-Level JSON ────────
-            for idx in range(len(df)):
-                row_dict = {}
-                for col in df.columns:
-                    val = df.iloc[idx][col]
-                    row_dict[col] = to_json_serializable(val)
-                        
-                row_json = json.dumps({
-                    "file": filename,
-                    "sheet": sheet_name,
-                    "table": table_id,
-                    "row": min_r + data_start_row + idx + 1,
-                    **row_dict
-                }, separators=(',', ':'))
-                
-                table_title_context = f"Table Title: {table_title}\n" if table_title else ""
-                final_text = f"{table_title_context}{row_json}"
-                
-                chunks.append({
-                    "text": final_text,
-                    "metadata": {
-                        "source": file_path,
-                        "source_name": filename,
-                        "source_file": filename,
-                        "type": "excel",
-                        "sheet_name": sheet_name,
-                        "table_id": table_id,
-                        "row_range": [min_r + data_start_row + idx + 1, min_r + data_start_row + idx + 1],
-                        "columns": final_columns,
-                        "column_dtypes": dtypes_dict,
-                        "value_source": value_source_flags[idx] if idx < len(value_source_flags) else "cached",
-                        "excluded_hidden_rows": excluded_hidden_rows,
-                        "chunk_tier": "row_json",
-                        "is_summary_row": is_summary_row_flags[idx] if idx < len(is_summary_row_flags) else False,
-                        "is_flagged": is_flagged_row_flags[idx] if idx < len(is_flagged_row_flags) else False
-                    }
-                })
-                
-            # ── Tier B: Row-Group Markdown ────
-            if len(df) < 5000:
+            # ── Table Summary Chunk for Vector Search ──
+            preview_df = df.head(5).fillna("")
+            preview_md = preview_df.to_markdown(index=False)
+            title_str = f" (Title: {table_title})" if table_title else ""
+            summary_text = (
+                f"## File: {filename} | Sheet: {sheet_name}{title_str} (SQL Table: {db_table_name})\n"
+                f"Total Rows: {len(df)}\n"
+                f"Columns ({len(final_columns)}): {', '.join(final_columns)}\n\n"
+                f"### Sample Rows Preview:\n{preview_md}"
+            )
+            chunks.append({
+                "text": summary_text,
+                "metadata": {
+                    "source": file_path,
+                    "source_name": filename,
+                    "source_file": filename,
+                    "type": "excel",
+                    "sheet_name": sheet_name,
+                    "table_id": db_table_name,
+                    "row_range": [min_r + data_start_row + 1, min_r + data_start_row + len(df)],
+                    "columns": final_columns,
+                    "column_dtypes": dtypes_dict,
+                    "chunk_tier": "table_summary",
+                }
+            })
+
+            # For small tables (<= 50 rows), include row markdown chunks for extra context
+            if len(df) <= 50:
                 window_size = 15
                 for i in range(0, len(df), window_size):
                     window_df = df.iloc[i:i+window_size].fillna("")

@@ -760,13 +760,38 @@ class RAGEngine:
                 );
             """)
 
-            # Create indices (tenant-aware)
+            # Tenant lookup index (small, always useful).
             cursor.execute("CREATE INDEX IF NOT EXISTS chunks_company_file_idx ON chunks(company_id, filename);")
-            try:
-                cursor.execute("CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx ON chunks USING hnsw (embedding vector_cosine_ops);")
-            except Exception as idx_err:
-                logger.warning(f"Could not create HNSW index: {idx_err}. Creating HNSW index requires pgvector >= 0.5.0. Falling back to default index.")
-                cursor.execute("CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks (embedding);")
+
+            # ANN index on embeddings is OPT-IN. HNSW is the single biggest disk
+            # consumer in a pgvector store — big enough to fill a small volume and
+            # crash the DB. At our scale (a few thousand chunks/company) an exact
+            # cosine scan is fast and uses a fraction of the disk, so we default to
+            # no ANN index. Set PGVECTOR_ANN_INDEX=hnsw (or ivfflat) to enable one
+            # on a larger volume. Any leftover HNSW index from before is dropped
+            # here so redeploying actually reclaims that space.
+            ann = os.getenv("PGVECTOR_ANN_INDEX", "none").strip().lower()
+            if ann == "hnsw":
+                try:
+                    cursor.execute("CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx ON chunks USING hnsw (embedding vector_cosine_ops);")
+                    logger.info("ANN index: HNSW enabled.")
+                except Exception as idx_err:
+                    logger.warning(f"Could not create HNSW index ({idx_err}); using exact cosine search instead.")
+            elif ann == "ivfflat":
+                try:
+                    cursor.execute("CREATE INDEX IF NOT EXISTS chunks_embedding_ivf_idx ON chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);")
+                    logger.info("ANN index: IVFFlat enabled.")
+                except Exception as idx_err:
+                    logger.warning(f"Could not create IVFFlat index ({idx_err}); using exact cosine search instead.")
+            else:
+                # Default: exact search, no ANN index. Drop any pre-existing HNSW
+                # index so its disk is returned to the volume on next deploy.
+                logger.info("ANN index: none (exact cosine search). Set PGVECTOR_ANN_INDEX=hnsw to enable.")
+                for stale in ("chunks_embedding_hnsw_idx", "chunks_embedding_ivf_idx", "chunks_embedding_idx"):
+                    try:
+                        cursor.execute(f"DROP INDEX IF EXISTS {stale};")
+                    except Exception as drop_err:
+                        logger.debug(f"Could not drop {stale}: {drop_err}")
                 
             logger.info(f"✅ PostgreSQL database initialized with connection.")
             

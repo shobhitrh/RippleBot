@@ -16,15 +16,13 @@ sees a new `X-Company-Id`.
 
 ## 1. Backend → Railway (API + LLM)
 
-You already created a Railway PostgreSQL. Now:
+Connect your Railway web service to your Neon PostgreSQL database:
 
-1. **New Project → Deploy from GitHub repo** (or `railway up` from this folder).
-   Railway auto-detects Python via the root `requirements.txt` and uses `railway.json`
+1. **Deploy from GitHub repo** (or `railway up` from this folder).
+   Railway auto-detects Python via root `requirements.txt` and uses `railway.json`
    (start command: `uvicorn backend.src.main:app --host 0.0.0.0 --port $PORT`).
 
-2. **Attach the database**: in the API service → **Variables → Add Reference →**
-   select your Postgres's `DATABASE_URL`. (The app reads `POSTGRES_URI` **or**
-   `DATABASE_URL`, so a reference is enough.)
+2. **Database Connection**: Set `POSTGRES_URI` (or `DATABASE_URL`) on your `web` service to your Neon connection string (`postgresql://...`).
 
 3. **Set the remaining variables** on the API service:
    ```

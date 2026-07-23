@@ -887,90 +887,75 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
     for t in all_sheet_tables:
         sqlite_tables.append((t["db_table_name"], t["df"], t["table_title"]))
 
-    # Phase 2: Per-Table Complete Markdown Chunking (Zero Row Loss)
+    # Phase 2: Per-Row Natural Language Chunking (Zero Context Loss)
     MAX_CHUNK_TOKENS = 750
-    MAX_CHUNKS_PER_FILE = 200
+    MAX_CHUNKS_PER_FILE = 250
 
     table_chunks = []
     for t in all_sheet_tables:
         df = t["df"]
         if df.empty:
             continue
-        db_table_name = t["db_table_name"]
-        final_columns = t["final_columns"]
-        table_title = t["table_title"]
-        sheet_name = t["sheet_name"]
+
+        columns = t["final_columns"]
         nrows = len(df)
-        dtypes_dict = {col: str(dtype) for col, dtype in df.dtypes.items()}
+        sheet_name = t["sheet_name"]
+        table_title = t["table_title"]
         title_str = f" (Title: {table_title})" if table_title else ""
-        header_text = (
-            f"## File: {filename} | Sheet: {sheet_name}{title_str} (Table: {db_table_name})\n"
-            f"Total Rows: {nrows} | Columns ({len(final_columns)}): {', '.join(final_columns)}\n\n"
-        )
-        
-        # Clean dataframe text to prevent newlines breaking Markdown grid rows
-        df_clean = df.copy().fillna("")
-        for col in df_clean.columns:
-            if df_clean[col].dtype == object:
-                df_clean[col] = df_clean[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', '', regex=False)
+        dtypes_dict = {col: str(dtype) for col, dtype in df.dtypes.items()}
 
-        full_md = df_clean.to_markdown(index=False)
-        total_tokens = count_tokens(header_text + full_md)
+        # For small tables (≤50 rows): 1 row per chunk
+        # For medium tables (51-500): 3 rows per chunk
+        # For large tables (>500): group rows into ~600 token slices
+        if nrows <= 50:
+            rows_per_chunk = 1
+        elif nrows <= 500:
+            rows_per_chunk = 3
+        else:
+            rows_per_chunk = max(nrows // 20, 5)
 
-        if total_tokens <= MAX_CHUNK_TOKENS:
-            # Emit as 1 complete table chunk
+        for start in range(0, nrows, rows_per_chunk):
+            end = min(start + rows_per_chunk, nrows)
+            chunk_rows = df.iloc[start:end].fillna("")
+
+            # Build natural language key-value representation for each row
+            row_nl_parts = []
+            for ri, (_, row) in enumerate(chunk_rows.iterrows(), start=start + 1):
+                cells = []
+                for col in columns:
+                    val = str(row.get(col, "")).strip().replace("\n", " ").replace("\r", "")
+                    if val and val.lower() != "nan":
+                        cells.append(f"{col}: {val}")
+                if cells:
+                    row_nl_parts.append(f"Row {ri}: {' | '.join(cells)}")
+
+            if not row_nl_parts:
+                continue
+
+            chunk_text = (
+                f"File: {filename} | Sheet: {sheet_name}{title_str}\n"
+                f"Table: {t['db_table_name']}\n"
+                f"Columns: {', '.join(columns)}\n"
+                f"Rows {start + 1}-{end} of {nrows}:\n\n"
+                + "\n".join(row_nl_parts)
+            )
+
             table_chunks.append({
-                "text": header_text + full_md,
+                "text": chunk_text,
                 "metadata": {
                     "source": file_path,
                     "source_name": filename,
                     "source_file": filename,
                     "type": "excel",
                     "sheet_name": sheet_name,
-                    "table_id": db_table_name,
+                    "table_id": t["db_table_name"],
                     "table_title": table_title,
-                    "row_range": [t["min_r"] + 1, t["max_r"] + 1],
-                    "columns": final_columns,
+                    "row_range": [t["min_r"] + start + 1, t["min_r"] + end],
+                    "columns": columns,
                     "column_dtypes": dtypes_dict,
-                    "chunk_tier": "table_full",
+                    "chunk_tier": "row_natural_language",
                 }
             })
-        else:
-            # Row-split into ~600 token chunks, preserving headers on every slice
-            start_idx = 0
-            while start_idx < nrows:
-                end_idx = start_idx + 1
-                while end_idx < nrows:
-                    slice_md = df_clean.iloc[start_idx:end_idx+1].to_markdown(index=False)
-                    if count_tokens(header_text + slice_md) > 650:
-                        break
-                    end_idx += 1
-                
-                slice_df = df_clean.iloc[start_idx:end_idx]
-                slice_md = slice_df.to_markdown(index=False)
-                row_start = t["min_r"] + start_idx + 1
-                row_end = t["min_r"] + end_idx
-                slice_header = (
-                    f"## File: {filename} | Sheet: {sheet_name}{title_str} (Table: {db_table_name}, Rows {row_start}-{row_end} of {nrows})\n"
-                    f"Columns ({len(final_columns)}): {', '.join(final_columns)}\n\n"
-                )
-                table_chunks.append({
-                    "text": slice_header + slice_md,
-                    "metadata": {
-                        "source": file_path,
-                        "source_name": filename,
-                        "source_file": filename,
-                        "type": "excel",
-                        "sheet_name": sheet_name,
-                        "table_id": db_table_name,
-                        "table_title": table_title,
-                        "row_range": [row_start, row_end],
-                        "columns": final_columns,
-                        "column_dtypes": dtypes_dict,
-                        "chunk_tier": "table_part",
-                    }
-                })
-                start_idx = end_idx
 
     chunks.extend(leftover_chunks)
     chunks.extend(table_chunks[:MAX_CHUNKS_PER_FILE])

@@ -154,6 +154,25 @@ def _pg_load(tables: List[Tuple[str, pd.DataFrame, str]], company_id: Optional[s
                 f"ON CONFLICT (table_name) DO UPDATE SET title = EXCLUDED.title, source_key = EXCLUDED.source_key;",
                 (phys, title, logical),
             )
+            # Build tsvector column for full-text search across all text columns
+            try:
+                text_cols = [c for c in prepped.columns if not pd.api.types.is_numeric_dtype(prepped[c])]
+                if text_cols:
+                    concat_expr = " || ' ' || ".join(f"coalesce({_qi(c)}, '')" for c in text_cols)
+                    cur.execute(
+                        f"ALTER TABLE {_qi(schema)}.{_qi(phys)} ADD COLUMN IF NOT EXISTS _fts_vector tsvector;"
+                    )
+                    cur.execute(
+                        f"UPDATE {_qi(schema)}.{_qi(phys)} "
+                        f"SET _fts_vector = to_tsvector('english', {concat_expr});"
+                    )
+                    cur.execute(
+                        f"CREATE INDEX IF NOT EXISTS {_qi('fts_idx_' + sanitize_name(phys))} "
+                        f"ON {_qi(schema)}.{_qi(phys)} USING GIN(_fts_vector);"
+                    )
+            except Exception as fts_err:
+                logger.debug(f"FTS index creation skipped for {phys}: {fts_err}")
+
             logger.info(f"[pg] loaded table {schema}.{phys} ({len(prepped)} rows)")
     except Exception as e:
         logger.error(f"[pg] load_tables failed: {e}", exc_info=True)
@@ -616,6 +635,87 @@ def cell_lookup(question: str, company_id: str = None) -> Optional[dict]:
     except Exception as e:
         logger.debug(f"cell_lookup failed: {e}")
     return None
+
+
+def plainto_tsquery_sql(query: str) -> str:
+    """Build a safe plainto_tsquery SQL fragment."""
+    safe = query.replace("'", "''")
+    return f"plainto_tsquery('english', '{safe}')"
+
+
+def fts_search(query: str, company_id: str = None, limit: int = 10) -> List[dict]:
+    """
+    Full-text search across ALL Tier-C tables for a query using PostgreSQL tsvector.
+    Returns list of {table, row_data, rank} dicts.
+    """
+    if not use_postgres():
+        return []
+
+    schema = _tenant_schema(company_id)
+    conn = _pg_conn()
+    results = []
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT table_name FROM information_schema.columns "
+            "WHERE table_schema = %s AND column_name = '_fts_vector';",
+            (schema,),
+        )
+        tables = [r[0] for r in cur.fetchall()]
+        tsquery = plainto_tsquery_sql(query)
+
+        for tbl in tables:
+            try:
+                cur.execute(
+                    f"SELECT *, ts_rank(_fts_vector, {tsquery}) AS _rank "
+                    f"FROM {_qi(schema)}.{_qi(tbl)} "
+                    f"WHERE _fts_vector @@ {tsquery} "
+                    f"ORDER BY _rank DESC LIMIT %s;",
+                    (limit,),
+                )
+                cols = [d[0] for d in cur.description if d[0] != "_fts_vector"]
+                for row in cur.fetchall():
+                    row_dict = {c: str(v)[:100] for c, v in zip(cols, row[:-1])}
+                    results.append({
+                        "table": tbl,
+                        "row_data": row_dict,
+                        "rank": row[-1],
+                    })
+            except Exception:
+                continue
+
+        results.sort(key=lambda x: x["rank"], reverse=True)
+    except Exception as e:
+        logger.error(f"FTS search failed: {e}")
+    finally:
+        conn.close()
+
+    return results[:limit]
+
+
+def fts_cell_lookup(question: str, company_id: str = None) -> Optional[dict]:
+    """
+    FTS-based fallback: search across ALL tables using PostgreSQL full-text search.
+    Returns {route, formatted_result, sources} if found, None otherwise.
+    """
+    results = fts_search(question, company_id, limit=5)
+    if not results:
+        return None
+
+    best = results[0]
+    col_names = list(best["row_data"].keys())
+    header = "| " + " | ".join(col_names) + " |"
+    sep = "| " + " | ".join(["---"] * len(col_names)) + " |"
+    rows_md = []
+    for r in results:
+        row = "| " + " | ".join(str(r["row_data"].get(c, "")) for c in col_names) + " |"
+        rows_md.append(row)
+
+    return {
+        "route": "FTS",
+        "results_markdown": f"Full-Text Search Results:\n{header}\n{sep}\n" + "\n".join(rows_md),
+        "sources": [],
+    }
 
 
 def get_router_schema(company_id: str = None) -> Dict[str, dict]:

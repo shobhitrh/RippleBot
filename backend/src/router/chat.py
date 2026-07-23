@@ -250,7 +250,7 @@ def verify_retrieval_results(
         or "0 records" in formatted.lower()
     ):
         logger.info(
-            f"Verification Stage: SQL returned 0 rows for query '{query_text}'. Triggering cell_lookup fallback."
+            f"Verification Stage: SQL returned 0 rows for query '{query_text}'. Triggering cell_lookup & FTS fallback."
         )
         hit = table_store.cell_lookup(query_text, company_id)
         if hit:
@@ -265,6 +265,12 @@ def verify_retrieval_results(
             )
             if res:
                 return res
+
+        # Try FTS full-text search across all tables if cell_lookup yielded 0 rows
+        fts_hit = table_store.fts_cell_lookup(query_text, company_id)
+        if fts_hit:
+            logger.info(f"[USIE] Verification FTS fallback matched rows for query '{query_text}'")
+            return fts_hit
 
     return sql_result
 
@@ -648,11 +654,29 @@ Output ONLY valid JSON."""
     for t, info in schema_map.items():
         title = info.get("title")
         title_str = f' (Table Title: "{title}")' if title else ""
+        col_names = [c["name"] for c in info.get("columns", [])]
         schema_desc += f"Table: {t}{title_str}\nColumns:\n"
         for c in info.get("columns", []):
             samples = c.get("samples") or []
             sample_str = f" [Sample values: {', '.join(samples)}]" if samples else ""
             schema_desc += f"  - {c['name']} ({c['type']}){sample_str}\n"
+
+        # Inject first 2 actual data rows as examples when columns are generic col_N
+        if col_names and any(c.startswith("col_") for c in col_names):
+            try:
+                example_rows = table_store.execute_select(
+                    f'SELECT * FROM "{t}" LIMIT 2', company_id
+                )
+                if example_rows and example_rows[1]:
+                    for ri, row in enumerate(example_rows[1][:2], 1):
+                        pairs = [
+                            f'{cn}="{str(v)[:50]}"'
+                            for cn, v in zip(example_rows[0], row)
+                        ]
+                        schema_desc += f"  Example Row {ri}: {', '.join(pairs)}\n"
+            except Exception:
+                pass
+
         schema_desc += "\n"
 
     # Cap total schema prompt size to 10,000 characters

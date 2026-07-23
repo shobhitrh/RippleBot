@@ -255,13 +255,13 @@ function KnowledgePage() {
                 Drop files here, or <span className="text-accent">browse</span>
               </div>
               <div className="text-[11px] sm:text-xs text-muted-foreground">
-                PDF, Excel (.xlsx, .xls), Markdown, DOCX, TXT — select multiple, up to 20 MB each
+                PDF, Excel (.xlsx, .xls, .csv), Markdown, DOCX, TXT — select multiple, up to 20 MB each
               </div>
               <input
                 type="file"
                 multiple
                 className="hidden"
-                accept=".pdf,.md,.docx,.txt,.xlsx,.xls"
+                accept=".pdf,.md,.docx,.txt,.xlsx,.xls,.csv,.tsv"
                 onChange={(e) => {
                   handleFiles(e.target.files);
                   e.target.value = ""; // allow re-selecting the same file(s)

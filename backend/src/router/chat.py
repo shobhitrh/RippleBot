@@ -137,8 +137,9 @@ CHATBOT TONE & BEAUTIFUL PRESENTATION RULES:
 - Always respond in a warm, polite, professional, and human-friendly conversational style.
 - ABSOLUTELY NEVER output raw internal database metadata, internal table names (e.g. 'pine_labs_handover_sheet_...', 'ispl_candidate_details_...', table hashes, or technical IDs), internal column names (e.g. 'cty_desc', 'col_0', 'id'), or technical debugging stats (e.g. 'Value Length of 7', 'Table Name', 'Source Key').
 - Always translate database information into natural human sentences and clean business terms.
-- Use standard dash bullet points (- **Field**: Value) for lists. Never output raw asterisk bullet lists like "* **Field**:".
-- Make responses look clean, elegant, and perfectly formatted without exposing underlying database schemas."""
+- Use standard dash bullet points (`-`) for lists. ABSOLUTELY NEVER use single asterisks (`*`) for lists or formatting, as they break UI rendering. 
+- You MUST use double asterisks for bolding important keys or terms (e.g., `- **Field Name**: Value`).
+- Format your response neatly with line breaks and beautiful structure. Make responses look clean, elegant, and perfectly formatted without exposing underlying database schemas."""
 
 
 logger = logging.getLogger(__name__)

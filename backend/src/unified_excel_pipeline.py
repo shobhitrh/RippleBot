@@ -176,8 +176,8 @@ class UnifiedExcelRAGPipeline:
                             md_lines.append("\n| " + " | ".join(cells) + " |")
                             md_lines.append("| " + " | ".join([":---"] * len(cells)) + " |")
                             in_table = True
-                            grid_headers = [c if c != '-' else f"col_{idx+1}" for idx, c in enumerate(raw_cells)]
-                            table_grid = []
+                            grid_headers = [f"col_{idx+1}" for idx in range(len(raw_cells))]
+                            table_grid = [raw_cells]
                         else:
                             md_lines.append("| " + " | ".join(cells) + " |")
                             table_grid.append(raw_cells)

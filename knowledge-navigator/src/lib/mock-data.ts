@@ -6,6 +6,7 @@ export type KnowledgeFile = {
   size: string;
   chunks: number;
   status: "processing" | "indexed" | "error";
+  errorMessage?: string;
   department?: string;
   category?: "Policy" | "Architecture" | "Q&A" | "Meeting" | "Other";
   preview?: string;

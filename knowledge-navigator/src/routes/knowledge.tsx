@@ -71,6 +71,7 @@ function KnowledgePage() {
             size: sizeStr,
             chunks: f.vector_count || 0,
             status: f.index_status === "indexed" ? "indexed" : f.index_status === "failed" ? "error" : "processing",
+            errorMessage: f.error_message,
             department: f.department || "General",
             category: f.category || (isFireflies ? "Meeting" : "Policy"),
             preview: f.filename,
@@ -295,7 +296,7 @@ function KnowledgePage() {
                       </div>
                     </div>
                   </div>
-                  <StatusBadge status={f.status} />
+                  <StatusBadge status={f.status} errorMessage={f.errorMessage} />
                 </div>
 
                 <div className="flex items-center justify-between pt-1.5 border-t text-xs">
@@ -358,7 +359,7 @@ function KnowledgePage() {
                     <TableCell className="text-sm text-muted-foreground">{f.size}</TableCell>
                     <TableCell className="text-sm text-muted-foreground">{f.chunks}</TableCell>
                     <TableCell>
-                      <StatusBadge status={f.status} />
+                      <StatusBadge status={f.status} errorMessage={f.errorMessage} />
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
@@ -465,15 +466,15 @@ function formatBytes(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-function StatusBadge({ status }: { status: KnowledgeFile["status"] }) {
+function StatusBadge({ status, errorMessage }: { status: KnowledgeFile["status"]; errorMessage?: string }) {
   const map = {
     indexed: { label: "Indexed", cls: "bg-emerald-500/10 text-emerald-600 border-emerald-500/30" },
     processing: { label: "Processing", cls: "bg-amber-500/10 text-amber-600 border-amber-500/30" },
-    error: { label: "Error", cls: "bg-red-500/10 text-red-600 border-red-500/30" },
+    error: { label: "Error", cls: "bg-red-500/10 text-red-600 border-red-500/30 cursor-help" },
   } as const;
   const v = map[status];
   return (
-    <Badge variant="outline" className={`${v.cls} capitalize`}>
+    <Badge variant="outline" className={`${v.cls} capitalize`} title={status === "error" ? (errorMessage || "Document processing failed. Click re-index to retry.") : undefined}>
       {v.label}
     </Badge>
   );

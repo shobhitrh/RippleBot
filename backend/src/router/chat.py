@@ -161,24 +161,23 @@ def verify_retrieval_results(sql_result: Optional[dict], query_text: str, compan
     """
     Verification Stage:
     Checks if primary SQL query returned 0 rows or failed.
-    If 0 rows, falls back to Inverted Cell Index (table_store.GLOBAL_CELL_INDEX).
+    If 0 rows, falls back to cell_lookup in PostgreSQL/SQLite table store.
     """
     if not sql_result:
         return None
         
-    formatted = sql_result.get("formatted_result", "")
+    formatted = str(sql_result.get("formatted_result") or sql_result.get("results_markdown") or "")
     if "0 rows" in formatted.lower() or "no rows returned" in formatted.lower() or "0 records" in formatted.lower():
-        logger.info(f"Verification Stage: SQL returned 0 rows for query '{query_text}'. Triggering Inverted Cell Index fallback.")
-        cell_matches = table_store.GLOBAL_CELL_INDEX.search(query_text)
-        if cell_matches:
-            fallback_text = f"Verified Cell Index Matches for '{query_text}':\n"
-            for tbl, col, row_idx, val in cell_matches[:10]:
-                fallback_text += f"- Table: {tbl} | Column: {col} | Row {row_idx+1}: {val}\n"
-            return {
-                "route": "CELL_INDEX",
-                "formatted_result": fallback_text,
-                "verification_status": "fallback_applied"
-            }
+        logger.info(f"Verification Stage: SQL returned 0 rows for query '{query_text}'. Triggering cell_lookup fallback.")
+        hit = table_store.cell_lookup(query_text, company_id)
+        if hit:
+            tbl, col, val = hit["table"], hit["column"], hit["value"]
+            fast_sql = f'SELECT * FROM "{tbl}" WHERE LOWER("{col}") LIKE \'%{val}%\' LIMIT 40'
+            schema_map = table_store.get_router_schema(company_id)
+            fast_sql = sanitize_sql(fast_sql, schema_map)
+            res = _execute_and_format(fast_sql, schema_map, company_id, route="CELL_INDEX")
+            if res:
+                return res
             
     return sql_result
 
@@ -329,43 +328,34 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
     )
     if sheet_ref_match and schema_map and not is_count_query:
         mentioned_raw = sheet_ref_match.group(1).strip().lower()
-        mentioned_words = set(re.split(r'[\s_\-]+', mentioned_raw))
+        common_stop = {"ispl", "candidate", "details", "screen", "master", "values", "xlsx", "table", "sheet", "information", "data", "source", "file", "tab"}
+        mentioned_words = {w for w in re.split(r'[\s_\-]+', mentioned_raw) if w and w not in common_stop and len(w) >= 3}
         best_match_name: Optional[str] = None
         best_score = 0
-        for t_name, info in schema_map.items():
-            title = (info.get("title") or t_name).lower()
-            slug = t_name.lower()
-            title_words = set(re.split(r'[\s_\-]+', title))
-            slug_words = set(re.split(r'[\s_\-]+', slug))
-            score = len(mentioned_words & title_words) * 2 + len(mentioned_words & slug_words)
-            if score > best_score:
-                best_score = score
-                best_match_name = t_name
-        if best_match_name and best_score >= 2:  # require at least one title word match
+        if mentioned_words:
+            for t_name, info in schema_map.items():
+                title = (info.get("title") or "").lower()
+                slug = t_name.lower()
+                title_words = {w for w in re.split(r'[\s_\-]+', title) if w and len(w) >= 3}
+                slug_words = {w for w in re.split(r'[\s_\-]+', slug) if w and w not in common_stop and len(w) >= 3}
+                score = len(mentioned_words & title_words) * 3 + len(mentioned_words & slug_words)
+                if score > best_score:
+                    best_score = score
+                    best_match_name = t_name
+        if best_match_name and best_score >= 2:
             select_sql = sanitize_sql(f'SELECT * FROM "{best_match_name}" LIMIT 30', schema_map)
             result = _execute_and_format(select_sql, schema_map, company_id, route="SHEET_LOOKUP")
             if result:
                 logger.info(f"[USIE] sheet-ref fast-path: '{mentioned_raw}' -> {best_match_name}")
                 return result
 
-    # ── Numeric ID fast-path guard ──
-    # If the query contains a long numeric ID (e.g. job ID 60593501), the cell index
-    # can't help (numeric columns aren't indexed as text). Skip CELL_INDEX to avoid
-    # false-positive hits on stopwords in the question, and let the LLM SQL router
-    # write the correct WHERE clause (which already works for these queries).
-    has_numeric_id = bool(re.search(r'\b\d{5,}\b', query_text))
-
     # ── Exact-value fast-path (Gap 1+2) ──
     # If a value in the question matches an indexed cell value (persisted,
     # per-tenant — survives restarts), we know which table+column holds it. This is
     # the deterministic fix for bare values / IDs / designations like
     # "Head-Wholesale Credit-CB" that embeddings route poorly.
-    #   • Specific match (multi-word value, or a short direct lookup) → short-circuit
-    #     straight to SQL, no LLM.
-    #   • Otherwise (a single common word inside a longer NL question) → pass it to
-    #     the LLM as a hint and let it decide, to avoid false-positive routing.
     id_hint = ""
-    if not is_count_query and not has_numeric_id:
+    if not is_count_query:
         hit = table_store.cell_lookup(query_text, company_id)
         if hit:
             value = hit["value"]
@@ -482,8 +472,31 @@ Output ONLY valid JSON."""
             except Exception:
                 continue
 
+        if not candidates and config.GEMINI_API_KEY:
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=config.GEMINI_API_KEY)
+                gmodel = genai.GenerativeModel("gemini-2.0-flash")
+                completion = gmodel.generate_content(shortlist_prompt)
+                txt = completion.text or ""
+                if "{" in txt:
+                    txt = txt[txt.find("{"):txt.rfind("}")+1]
+                    cdata = json.loads(txt)
+                    candidates = cdata.get("candidates", [])
+            except Exception as ge:
+                logger.warning(f"Gemini table shortlist fallback failed: {ge}")
+
         if candidates:
-            filtered_schema = {t: schema_map[t] for t in candidates if t in schema_map}
+            filtered_schema = {}
+            for t, info in schema_map.items():
+                t_norm = t.lower()
+                t_title = (info.get("title") or "").lower()
+                for c in candidates:
+                    c_norm = re.sub(r'[^\w]+', '_', c.lower()).strip('_')
+                    c_words = [w for w in re.split(r'[\s_\-]+', c.lower()) if len(w) >= 3]
+                    if (c_norm and c_norm in t_norm) or (c.lower() and c.lower() in t_title) or any(w in t_norm for w in c_words):
+                        filtered_schema[t] = info
+                        break
             if filtered_schema:
                 schema_map = filtered_schema
 
@@ -604,6 +617,10 @@ JSON Output:"""
             data = json.loads(fixed_json, strict=False)
         if data.get("route") == "SQL" and data.get("sql_query"):
             sql = data["sql_query"]
+            # For non-aggregate row lookups, replace selective column lists with SELECT *
+            # so the full row context (including related IDs and certifications) is returned.
+            if re.search(r'^SELECT\s+(?!COUNT|SUM|AVG|MIN|MAX|DISTINCT).+?\s+FROM\b', sql, re.IGNORECASE) and "GROUP BY" not in sql.upper():
+                sql = re.sub(r'^SELECT\s+.+?\s+FROM\b', 'SELECT * FROM', sql, flags=re.IGNORECASE)
             # Sanitize reserved-word column names before execution
             sql = sanitize_sql(sql, schema_map)
             logger.info(f"Query-Time Router selected SQL path: {sql}")

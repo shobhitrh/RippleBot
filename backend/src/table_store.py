@@ -387,17 +387,18 @@ CELL_INDEX = "__cell_index__"
 
 def _iter_index_values(df: "pd.DataFrame"):
     """
-    Yield (column_name, value) for short text values worth indexing for exact
+    Yield (column_name, value) for short text & numeric values worth indexing for exact
     lookup — IDs, codes, names, cities, categorical/designation values. Skips
-    numeric columns (measures) and long free-text (handled by vector search).
+    long free-text (handled by vector search).
     """
     for col in df.columns:
-        if pd.api.types.is_numeric_dtype(df[col]):
-            continue
         seen = set()
         for v in df[col].dropna().tolist():
             s = str(v).strip()
-            if 3 <= len(s) <= 60:
+            # Strip ".0" suffix from whole-number floats (e.g. 60593501.0 -> "60593501")
+            if s.endswith('.0') and s[:-2].isdigit():
+                s = s[:-2]
+            if 2 <= len(s) <= 60:
                 key = s.lower()
                 if key not in seen:
                     seen.add(key)
@@ -538,7 +539,10 @@ def cell_lookup(question: str, company_id: str = None) -> Optional[dict]:
             finally:
                 conn.close()
         if row:
-            return {"table": row[0], "column": row[1], "value": row[2]}
+            val = str(row[2]).strip()
+            if val.endswith('.0') and val[:-2].isdigit():
+                val = val[:-2]
+            return {"table": row[0], "column": row[1], "value": val}
     except Exception as e:
         logger.debug(f"cell_lookup failed: {e}")
     return None

@@ -992,6 +992,7 @@ class RAGEngine:
         chunks = process_file(file_info, self.company_id)
         if not chunks:
             logger.warning(f"No chunks created from {file_info['name']}; nothing to store.")
+            self._mark_file_failed(file_info['path'], file_info['hash'], "No text or chunks could be extracted from this file.")
             return False
 
         # Every chunk of one file shares the same source filename + hash.

@@ -232,21 +232,19 @@ async def list_documents(company_id: str = CompanyId):
             except Exception:
                 pass
         
+        info = db_docs.get(filename, {})
         doc_info = {
             "filename": filename,
             "path": f"./backend/knowledge_base/{filename}",
             "size": file_size,
             "modified": mod_time,
-            "department": "General",
-            "uploaded_by": "System",
-            "category": "Document",
-            "index_status": "indexed" if filename in db_docs else "pending",
-            "error_message": None,
-            "vector_count": 0
+            "department": info.get("department", "General"),
+            "uploaded_by": info.get("uploaded_by", "System"),
+            "category": info.get("category", "Document"),
+            "index_status": info.get("index_status", "pending"),
+            "error_message": info.get("error_message"),
+            "vector_count": info.get("vector_count", 0)
         }
-        
-        if filename in db_docs:
-            doc_info.update(db_docs[filename])
             
         result.append(doc_info)
         

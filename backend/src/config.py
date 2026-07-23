@@ -60,14 +60,9 @@ def _valid_key(k):
     return bool(k) and not k.strip().lower().startswith("your_")
 
 
-# Groq keys, tried in order for fallback (GROQ_API_KEY -> _2 -> _3).
-GROQ_API_KEYS = [
-    k for k in (
-        os.getenv("GROQ_API_KEY"),
-        os.getenv("GROQ_API_KEY2"),
-        os.getenv("GROQ_API_KEY3"),
-    ) if _valid_key(k)
-]
+# Groq keys, tried in order for fallback (GROQ_API_KEY -> GROQ_API_KEY2 -> GROQ_API_KEY3 -> GROQ_API_KEY4 ...).
+_groq_env_keys = [os.getenv("GROQ_API_KEY")] + [os.getenv(f"GROQ_API_KEY{i}") for i in range(2, 11)]
+GROQ_API_KEYS = [k for k in _groq_env_keys if _valid_key(k)]
 # Backwards-compatible single-key alias (first valid Groq key).
 GROQ_API_KEY = GROQ_API_KEYS[0] if GROQ_API_KEYS else None
 

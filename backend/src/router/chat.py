@@ -133,12 +133,12 @@ SCOPE — CUSTOMER ISOLATION (non-negotiable):
 - Never mention, compare to, or draw on any other customer or company.
 - Speak naturally as "{company_display}"'s dedicated assistant.
 
-CHATBOT TONE & PRESENTATION RULES:
+CHATBOT TONE & BEAUTIFUL PRESENTATION RULES:
 - Always respond in a warm, polite, professional, and human-friendly conversational style.
-- NEVER output raw internal database metadata, internal table names (e.g., 'ispl_candidate_details_screen_master_values_...', table hashes, or technical IDs), internal column names (e.g., 'cty_desc', 'col_0', 'col_1'), or technical debugging stats (e.g., 'value length of 8', 'column name of job_id').
-- Always translate database column and table names into natural human terms (e.g., say "We have 219 countries in our records" instead of "in the 'cty_desc' column", or "Here are the details for Job ID 60593501" instead of "Job ID 60593501 is present in table...").
-- When answering a question about a specific entity or record (like a Job ID, candidate, or ticket), summarize all available fields/attributes in a clean, formatted Markdown list or table.
-- Use clear formatting (bolding, bullet points, numbered lists) to make answers easy to read."""
+- ABSOLUTELY NEVER output raw internal database metadata, internal table names (e.g. 'pine_labs_handover_sheet_...', 'ispl_candidate_details_...', table hashes, or technical IDs), internal column names (e.g. 'cty_desc', 'col_0', 'id'), or technical debugging stats (e.g. 'Value Length of 7', 'Table Name', 'Source Key').
+- Always translate database information into natural human sentences and clean business terms.
+- Use standard dash bullet points (- **Field**: Value) for lists. Never output raw asterisk bullet lists like "* **Field**:".
+- Make responses look clean, elegant, and perfectly formatted without exposing underlying database schemas."""
 
 
 logger = logging.getLogger(__name__)
@@ -238,8 +238,8 @@ def verify_retrieval_results(
 ) -> Optional[dict]:
     """
     Verification Stage:
-    Checks if primary SQL query returned 0 rows or failed.
-    If 0 rows, falls back to cell_lookup in PostgreSQL/SQLite table store.
+    Checks if primary SQL query returned 0 rows or zero count.
+    If 0 rows/count, falls back to cell_lookup & FTS, or returns None to trigger vector search fallback.
     """
     if not sql_result:
         return None
@@ -247,13 +247,15 @@ def verify_retrieval_results(
     formatted = str(
         sql_result.get("formatted_result") or sql_result.get("results_markdown") or ""
     )
+    is_zero_count = bool(re.search(r"\|\s*0\s*\|", formatted))
     if (
         "0 rows" in formatted.lower()
         or "no rows returned" in formatted.lower()
         or "0 records" in formatted.lower()
+        or is_zero_count
     ):
         logger.info(
-            f"Verification Stage: SQL returned 0 rows for query '{query_text}'. Triggering cell_lookup & FTS fallback."
+            f"Verification Stage: SQL returned 0 rows/count for query '{query_text}'. Triggering cell_lookup & FTS fallback."
         )
         hit = table_store.cell_lookup(query_text, company_id)
         if hit:
@@ -274,6 +276,9 @@ def verify_retrieval_results(
         if fts_hit:
             logger.info(f"[USIE] Verification FTS fallback matched rows for query '{query_text}'")
             return fts_hit
+
+        # Return None to trigger fallback to Voyage Reranker vector search!
+        return None
 
     return sql_result
 

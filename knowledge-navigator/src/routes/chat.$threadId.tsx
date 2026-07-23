@@ -760,6 +760,54 @@ function EmptyState({ onPick }: { onPick: (p: string) => void }) {
   );
 }
 
+// ── Formatted Markdown Message Renderer ──────────────────
+function FormattedMessageContent({ text }: { text: string }) {
+  const clean = text
+    .replace(/\s*\[Source:.*?\]\s*/g, "")
+    .replace(/\s*\[Source\s+\d+:.*?\]\s*/g, "")
+    .replace(/pine_labs_[a-z0-9_]+/gi, "Pine Labs Database Record")
+    .replace(/ispl_[a-z0-9_]+/gi, "Candidate Master Record")
+    .trim();
+
+  const lines = clean.split("\n");
+  return (
+    <div className="space-y-1.5">
+      {lines.map((line, idx) => {
+        let trimmed = line.trim();
+        if (!trimmed) return <div key={idx} className="h-1" />;
+
+        const isBullet = trimmed.startsWith("* ") || trimmed.startsWith("- ") || trimmed.startsWith("• ");
+        if (isBullet) {
+          trimmed = trimmed.replace(/^[\*\-\•]\s*/, "");
+        }
+
+        const parts = trimmed.split(/(\*\*.*?\*\*)/g);
+        const content = parts.map((part, pIdx) => {
+          if (part.startsWith("**") && part.endsWith("**") && part.length >= 4) {
+            return (
+              <strong key={pIdx} className="font-semibold text-foreground">
+                {part.slice(2, -2)}
+              </strong>
+            );
+          }
+          return part;
+        });
+
+        if (isBullet) {
+          return (
+            <div key={idx} className="flex items-start gap-2 pl-0.5">
+              <span className="text-accent font-bold mt-0.5 select-none text-xs">•</span>
+              <div className="flex-1 min-w-0">{content}</div>
+            </div>
+          );
+        }
+
+        return <div key={idx} className="leading-relaxed">{content}</div>;
+      })}
+    </div>
+  );
+}
+
 // ── Message bubble ────────────────────────────────────────
 function MessageBubble({
   m,
@@ -810,7 +858,7 @@ function MessageBubble({
               <span className="typing-dot h-2 w-2 rounded-full bg-accent/70 inline-block" />
             </div>
           ) : m.content ? (
-            m.content.replace(/\s*\[Source:.*?\]\s*/g, "").replace(/\s*\[Source\s+\d+:.*?\]\s*/g, "").trim()
+            <FormattedMessageContent text={m.content} />
           ) : (
             "\u00A0"
           )}

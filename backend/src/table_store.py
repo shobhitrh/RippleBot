@@ -440,12 +440,24 @@ class InvertedCellIndex:
             self._rows[(db_table_name, int(row_idx))] = row_dict
 
     def search(self, query: str) -> List[Tuple[str, str, int, str]]:
+        stopwords = {
+            "what", "can", "you", "tell", "me", "about", "job", "id", "code", "name",
+            "the", "a", "an", "is", "are", "of", "in", "for", "to", "with", "on", "at",
+            "by", "from", "show", "get", "find", "list", "give", "details", "info",
+            "information", "value", "entry", "record", "data", "sheet", "table"
+        }
         raw_tokens = set(re.split(r'[^\w]+', query.lower()))
-        query_tokens = {t for t in raw_tokens if t}
-        query_tokens.add(query.strip().lower())
+        all_tokens = {t for t in raw_tokens if t}
+        all_tokens.add(query.strip().lower())
+        
+        # Separate high-specificity tokens (numbers, codes, non-stopwords) from stopwords
+        high_spec_tokens = {t for t in all_tokens if t not in stopwords and len(t) >= 2}
+        low_spec_tokens = all_tokens - high_spec_tokens
+
+        # Search high-specificity tokens first
         results = []
         seen = set()
-        for t in query_tokens:
+        for t in list(high_spec_tokens) + list(low_spec_tokens):
             if t in self._index:
                 for item in self._index[t]:
                     if item not in seen:
@@ -455,43 +467,84 @@ class InvertedCellIndex:
 
     def search_markdown(self, query: str, limit: int = 5) -> str:
         """
-        Search exact tokens and return formatted Markdown snippets of matching full rows.
+        Search tokens with specificity-based scoring and return formatted Markdown
+        snippets of top-matching full rows.
         Injects metadata headers: Table Name, Row Index, Columns.
         """
         raw_hits = self.search(query)
         if not raw_hits:
             return ""
 
-        # Group hits by (db_table_name, row_idx)
-        table_rows: Dict[str, List[Tuple[int, Dict[str, str]]]] = {}
+        stopwords = {
+            "what", "can", "you", "tell", "me", "about", "job", "id", "code", "name",
+            "the", "a", "an", "is", "are", "of", "in", "for", "to", "with", "on", "at",
+            "by", "from", "show", "get", "find", "list", "give", "details", "info",
+            "information", "value", "entry", "record", "data", "sheet", "table"
+        }
+        query_words = set(re.split(r'[^\w]+', query.lower()))
+        specific_words = {w for w in query_words if w not in stopwords and len(w) >= 2}
+
+        # Score matching rows based on token specificity & exact string matches
+        row_scores: Dict[Tuple[str, int], float] = {}
+        row_data_map: Dict[Tuple[str, int], Dict[str, str]] = {}
+
         for db_table_name, col_name, row_idx, cell_val in raw_hits:
             row_key = (db_table_name, row_idx)
             row_dict = self._rows.get(row_key)
             if not row_dict:
                 continue
-            if db_table_name not in table_rows:
-                table_rows[db_table_name] = []
-            if not any(r[0] == row_idx for r in table_rows[db_table_name]):
-                table_rows[db_table_name].append((row_idx, row_dict))
 
-        if not table_rows:
+            row_data_map[row_key] = row_dict
+            cell_lower = cell_val.lower()
+
+            # Calculate row score
+            score = 0.0
+            for w in specific_words:
+                if w in cell_lower:
+                    # Digit / numeric match gets highest score
+                    if w.isdigit():
+                        score += 10.0
+                    else:
+                        score += 5.0
+                if cell_lower == w:
+                    score += 10.0
+
+            # Small boost for stopword matches if no specific score
+            if score == 0.0:
+                score += 0.01
+
+            row_scores[row_key] = max(row_scores.get(row_key, 0.0), score)
+
+        # Sort row keys by score descending
+        sorted_row_keys = sorted(row_scores.keys(), key=lambda k: row_scores[k], reverse=True)
+        
+        # Filter out rows with negligible score if high-scoring rows exist
+        max_score = row_scores[sorted_row_keys[0]] if sorted_row_keys else 0.0
+        if max_score >= 5.0:
+            sorted_row_keys = [k for k in sorted_row_keys if row_scores[k] >= 1.0]
+
+        if not sorted_row_keys:
             return ""
 
+        # Group top-scored rows by table name
+        table_rows: Dict[str, List[Tuple[int, Dict[str, str]]]] = {}
+        for db_table_name, row_idx in sorted_row_keys[:limit]:
+            row_dict = row_data_map[(db_table_name, row_idx)]
+            if db_table_name not in table_rows:
+                table_rows[db_table_name] = []
+            table_rows[db_table_name].append((row_idx, row_dict))
+
         markdown_blocks = []
-        count = 0
         for db_table_name, rows_list in table_rows.items():
-            if count >= limit:
-                break
             cols = self._table_columns.get(db_table_name, list(rows_list[0][1].keys()))
             
             # Format as Markdown table
             hdr_line = "| " + " | ".join(cols) + " |"
             sep_line = "| " + " | ".join(["---"] * len(cols)) + " |"
             data_lines = []
-            for r_idx, r_dict in rows_list[:5]:
+            for r_idx, r_dict in rows_list:
                 vals = [r_dict.get(c, "").replace("\n", " ") for c in cols]
                 data_lines.append("| " + " | ".join(vals) + " |")
-                count += 1
 
             block = (
                 f"### Exact Cell Index Hit (Table: `{db_table_name}`, Matched {len(rows_list)} Row(s)):\n"

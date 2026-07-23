@@ -290,6 +290,13 @@ async def delete_document(filename: str, company_id: str = CompanyId):
         except Exception as e:
             logger.error(f"Error deleting index records for {safe_filename}: {e}")
 
+    try:
+        from backend.src.excel_parser import delete_tables_from_sqlite
+        delete_tables_from_sqlite(safe_filename, company_id)
+        logger.info(f"Deleted relational SQL tables for: {safe_filename}")
+    except Exception as e:
+        logger.error(f"Error dropping relational SQL tables for {safe_filename}: {e}")
+
     # Drop it from durable storage too, so it doesn't get rehydrated on next boot.
     file_store.delete(company_id, safe_filename)
     file_store.delete(company_id, safe_filename + ".metadata.json")
@@ -490,7 +497,8 @@ async def reindex_documents(background_tasks: BackgroundTasks, company_id: str =
     
     def _run_reindex():
         logger.info(f"Starting background re-indexing for company: {company_id}")
-        engine._index_existing_documents()
+        if engine:
+            engine.build_index(force_rebuild=True)
         logger.info(f"Re-indexing completed for company: {company_id}")
 
     background_tasks.add_task(_run_reindex)

@@ -14,6 +14,53 @@ from backend.src import table_store
 from backend.src.rag_engine import get_engine
 from backend.src.excel_parser import sanitize_name
 
+# SQL reserved words that must always be double-quoted when used as identifiers
+_SQL_RESERVED = frozenset({
+    "values", "value", "select", "from", "where", "table", "order", "group",
+    "index", "distinct", "key", "references", "check", "primary", "foreign",
+    "unique", "default", "column", "row", "join", "inner", "outer", "left",
+    "right", "on", "as", "set", "insert", "update", "delete", "create", "drop",
+    "alter", "view", "trigger", "all", "any", "exists", "in", "like", "not",
+    "and", "or", "is", "null", "true", "false", "case", "when", "then", "else",
+    "end", "limit", "offset", "having", "union", "except", "intersect",
+    "natural", "cross", "full", "with", "recursive"
+})
+
+
+def _quote_col(col: str) -> str:
+    """Return col double-quoted if it clashes with a SQL reserved word."""
+    if col.lower() in _SQL_RESERVED:
+        return f'"{col}"'
+    return f'"{col}"'  # always quote for safety
+
+
+def sanitize_sql(sql: str, schema_map: dict) -> str:
+    """
+    Post-process LLM-generated SQL to double-quote every known column name
+    that is a SQL reserved word, preventing syntax errors like
+    `near "values": syntax error`.
+    This is a belt-and-suspenders fix that works even when the DB still has
+    old column names from before our excel_parser reserved-word fix.
+    """
+    if not sql:
+        return sql
+    all_cols: set = set()
+    for info in (schema_map or {}).values():
+        for c in info.get("columns", []):
+            name = c.get("name", "")
+            if name.lower() in _SQL_RESERVED:
+                all_cols.add(name)
+    for col in all_cols:
+        # Quote bare reserved-word column references not already quoted
+        # e.g. LOWER(values) -> LOWER("values"), "values" stays "values"
+        sql = re.sub(
+            r'(?<!\.)(\b' + re.escape(col) + r'\b)(?!\s*")',
+            lambda m: f'"{m.group(1)}"' if not (m.start() > 0 and sql[m.start()-1] == '"') else m.group(1),
+            sql,
+            flags=re.IGNORECASE
+        )
+    return sql
+
 def _persona(company_display: str) -> str:
     """Shared system-prompt preamble that locks the assistant to one customer
     and to a technical/configuration (not sales/marketing) posture."""
@@ -246,6 +293,30 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
     if not schema_map:
         return None
 
+    # ── Schema meta-question fast-path ──
+    # Handles "what sheets are available?", "what tables exist?", "list all sheets"
+    # These have no SQL table to query — answer directly from schema_map.
+    meta_patterns = [
+        r'\b(what|which|list|show).*(sheet|table|workbook|file|available|exist)',
+        r'\b(sheets|tables|workbooks).*(available|exist|present|in)',
+        r'\bfind.*(sheet|table|candidate type)',
+    ]
+    is_meta_question = any(re.search(p, query_text.lower()) for p in meta_patterns)
+    if is_meta_question and schema_map:
+        titles = []
+        for t_name, info in schema_map.items():
+            title = info.get("title") or t_name
+            titles.append(f"- {title}")
+        schema_list_md = "\n".join(titles)
+        meta_result = {
+            "route": "SCHEMA_META",
+            "sql_query": "(schema listing)",
+            "results_markdown": f"Available sheets/tables in this workbook:\n{schema_list_md}",
+            "sources": [],
+        }
+        logger.info(f"[USIE] schema-meta fast-path returned {len(titles)} tables")
+        return meta_result
+
     # ── Exact-value fast-path (Gap 1+2) ──
     # If a value in the question matches an indexed cell value (persisted,
     # per-tenant — survives restarts), we know which table+column holds it. This is
@@ -262,23 +333,38 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
             value = hit["value"]
             multiword = (" " in value) or ("-" in value)
             short_lookup = len(query_text.split()) <= 5
-            col = hit["column"].replace('"', '""')
-            tbl = hit["table"].replace('"', '""')
+            tbl = hit["table"]
+            col = hit["column"]
+            # Determine all columns in the matched table for multi-column LIKE
+            tbl_info = schema_map.get(tbl, {})
+            tbl_cols = [c["name"] for c in tbl_info.get("columns", [])]
             if multiword or short_lookup:
+                # Build LIKE clauses across ALL text columns for robustness
                 val = value.replace("'", "''").lower()
-                fast_sql = f'SELECT * FROM "{tbl}" WHERE LOWER("{col}") LIKE \'%{val}%\' LIMIT 40'
+                if tbl_cols:
+                    like_clauses = " OR ".join(
+                        f'LOWER("{c}") LIKE \'%{val}%\''
+                        for c in tbl_cols
+                        if not c.startswith("__")  # skip internal meta cols
+                    )
+                    fast_sql = f'SELECT * FROM "{tbl}" WHERE {like_clauses} LIMIT 40'
+                else:
+                    tbl_esc = tbl.replace('"', '""')
+                    col_esc = col.replace('"', '""')
+                    fast_sql = f'SELECT * FROM "{tbl_esc}" WHERE LOWER("{col_esc}") LIKE \'%{val}%\' LIMIT 40'
+                fast_sql = sanitize_sql(fast_sql, schema_map)
                 result = _execute_and_format(fast_sql, schema_map, company_id, route="CELL_INDEX")
                 if result:
                     latency = (datetime.now() - t0).total_seconds() * 1000
                     logger.info(
-                        f"[USIE] exact-value fast-path: '{value}' -> "
-                        f"{hit['table']}.{hit['column']} ({latency:.0f}ms)"
+                        f"[USIE] exact-value fast-path: '{value}' ->"
+                        f"{tbl}.{col} ({latency:.0f}ms)"
                     )
                     return result
             else:
                 id_hint = (
-                    f"\nHint: the value '{value}' appears in table \"{hit['table']}\" "
-                    f"column \"{hit['column']}\" — use it if relevant."
+                    f"\nHint: the value '{value}' appears in table \"{tbl}\" "
+                    f"column \"{col}\" — use it if relevant."
                 )
 
     # Step A: Query Rewriter & Step B: Entity Normalization
@@ -457,6 +543,8 @@ JSON Output:"""
             data = json.loads(fixed_json, strict=False)
         if data.get("route") == "SQL" and data.get("sql_query"):
             sql = data["sql_query"]
+            # Sanitize reserved-word column names before execution
+            sql = sanitize_sql(sql, schema_map)
             logger.info(f"Query-Time Router selected SQL path: {sql}")
             result = _execute_and_format(sql, schema_map, company_id)
             if result is None:

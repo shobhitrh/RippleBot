@@ -23,6 +23,7 @@ The SQLite path is byte-for-byte the same logic the router used before; the
 Postgres path mirrors it (typed columns so SUM/AVG work, per-tenant schema for
 isolation, read-only execution for safety).
 """
+
 import os
 import re
 import json
@@ -60,7 +61,9 @@ def _prep_df(df: pd.DataFrame) -> pd.DataFrame:
         if pd.api.types.is_datetime64_any_dtype(df[col]):
             df[col] = df[col].dt.strftime("%Y-%m-%d %H:%M:%S")
         else:
-            df[col] = df[col].apply(lambda x: x.isoformat() if hasattr(x, "isoformat") else x)
+            df[col] = df[col].apply(
+                lambda x: x.isoformat() if hasattr(x, "isoformat") else x
+            )
 
     new_cols, seen = [], {}
     for c in df.columns:
@@ -83,6 +86,7 @@ def _pg_engine():
     global _PG_ENGINE
     if _PG_ENGINE is None:
         from sqlalchemy import create_engine
+
         _PG_ENGINE = create_engine(config.POSTGRES_URI, pool_pre_ping=True)
     return _PG_ENGINE
 
@@ -90,6 +94,7 @@ def _pg_engine():
 def _pg_conn():
     """Raw psycopg2 connection (autocommit) for DDL/introspection."""
     import psycopg2
+
     c = psycopg2.connect(config.POSTGRES_URI)
     c.autocommit = True
     return c
@@ -170,7 +175,8 @@ def _pg_delete_for_file(filename: str, company_id: Optional[str]):
         for (phys,) in rows:
             cur.execute(f"DROP TABLE IF EXISTS {_qi(schema)}.{_qi(phys)};")
             cur.execute(
-                f"DELETE FROM {_qi(schema)}.{_qi(META_TABLE)} WHERE table_name = %s;", (phys,)
+                f"DELETE FROM {_qi(schema)}.{_qi(META_TABLE)} WHERE table_name = %s;",
+                (phys,),
             )
             logger.info(f"[pg] dropped table {schema}.{phys}")
     except Exception as e:
@@ -214,7 +220,10 @@ def _pg_router_schema(company_id: Optional[str]) -> Dict[str, dict]:
             cols = []
             for col_name, col_type in cur.fetchall():
                 samples = []
-                is_text = any(t_kw in str(col_type).lower() for t_kw in ("text", "char", "varchar", "string"))
+                is_text = any(
+                    t_kw in str(col_type).lower()
+                    for t_kw in ("text", "char", "varchar", "string")
+                )
                 if is_text:
                     try:
                         cur.execute(
@@ -227,8 +236,14 @@ def _pg_router_schema(company_id: Optional[str]) -> Dict[str, dict]:
                                 samples.append(s)
                     except Exception:
                         pass
-                cols.append({"name": col_name, "type": col_type, "samples": samples[:8]})
-            out[t] = {"title": titles.get(t), "source_key": sources.get(t), "columns": cols}
+                cols.append(
+                    {"name": col_name, "type": col_type, "samples": samples[:8]}
+                )
+            out[t] = {
+                "title": titles.get(t),
+                "source_key": sources.get(t),
+                "columns": cols,
+            }
     finally:
         conn.close()
     return out
@@ -237,6 +252,7 @@ def _pg_router_schema(company_id: Optional[str]) -> Dict[str, dict]:
 def _pg_execute_select(sql: str, company_id: Optional[str]) -> Tuple[List[str], list]:
     schema = _tenant_schema(company_id)
     import psycopg2
+
     conn = psycopg2.connect(config.POSTGRES_URI)
     try:
         cur = conn.cursor()
@@ -255,7 +271,9 @@ def _pg_execute_select(sql: str, company_id: Optional[str]) -> Tuple[List[str], 
 # ══════════════════════════════════════════════════════════════════════════════
 # SQLite backend (legacy — unchanged behaviour)
 # ══════════════════════════════════════════════════════════════════════════════
-def _sqlite_load(tables: List[Tuple[str, pd.DataFrame, str]], company_id: Optional[str]):
+def _sqlite_load(
+    tables: List[Tuple[str, pd.DataFrame, str]], company_id: Optional[str]
+):
     db_path = get_db_path(company_id)
     try:
         conn = sqlite3.connect(db_path)
@@ -310,7 +328,11 @@ def _sqlite_router_schema(company_id: Optional[str]) -> Dict[str, dict]:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
         cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = [r[0] for r in cur.fetchall() if not r[0].startswith("sqlite_") and r[0] != META_TABLE]
+        tables = [
+            r[0]
+            for r in cur.fetchall()
+            if not r[0].startswith("sqlite_") and r[0] != META_TABLE
+        ]
         if not tables:
             conn.close()
             return {}
@@ -327,17 +349,27 @@ def _sqlite_router_schema(company_id: Optional[str]) -> Dict[str, dict]:
                 col_name, col_type = c[1], c[2]
                 samples = []
                 # Only fetch samples for text/string columns
-                is_text = any(t_kw in str(col_type).lower() for t_kw in ("text", "char", "varchar", "string")) or col_type == ""
+                is_text = (
+                    any(
+                        t_kw in str(col_type).lower()
+                        for t_kw in ("text", "char", "varchar", "string")
+                    )
+                    or col_type == ""
+                )
                 if is_text:
                     try:
-                        cur.execute(f'SELECT DISTINCT "{col_name}" FROM "{t}" WHERE "{col_name}" IS NOT NULL LIMIT 8')
+                        cur.execute(
+                            f'SELECT DISTINCT "{col_name}" FROM "{t}" WHERE "{col_name}" IS NOT NULL LIMIT 8'
+                        )
                         for (v,) in cur.fetchall():
                             s = str(v).strip()
                             if s and len(s) < 60:
                                 samples.append(s)
                     except Exception:
                         pass
-                cols.append({"name": col_name, "type": col_type, "samples": samples[:8]})
+                cols.append(
+                    {"name": col_name, "type": col_type, "samples": samples[:8]}
+                )
             out[t] = {"title": titles.get(t), "source_key": t, "columns": cols}
         conn.close()
     except Exception as e:
@@ -346,7 +378,9 @@ def _sqlite_router_schema(company_id: Optional[str]) -> Dict[str, dict]:
     return out
 
 
-def _sqlite_execute_select(sql: str, company_id: Optional[str]) -> Tuple[List[str], list]:
+def _sqlite_execute_select(
+    sql: str, company_id: Optional[str]
+) -> Tuple[List[str], list]:
     db_path = get_db_path(company_id)
     conn = sqlite3.connect(db_path)
     try:
@@ -396,7 +430,7 @@ def _iter_index_values(df: "pd.DataFrame"):
         for v in df[col].dropna().tolist():
             s = str(v).strip()
             # Strip ".0" suffix from whole-number floats (e.g. 60593501.0 -> "60593501")
-            if s.endswith('.0') and s[:-2].isdigit():
+            if s.endswith(".0") and s[:-2].isdigit():
                 s = s[:-2]
             if 2 <= len(s) <= 60:
                 key = s.lower()
@@ -407,13 +441,16 @@ def _iter_index_values(df: "pd.DataFrame"):
                 break
 
 
-def _build_cell_index(tables: List[Tuple[str, pd.DataFrame, str]], company_id: Optional[str]):
+def _build_cell_index(
+    tables: List[Tuple[str, pd.DataFrame, str]], company_id: Optional[str]
+):
     try:
         if use_postgres():
             schema = _tenant_schema(company_id)
             conn = _pg_conn()
             try:
                 from psycopg2.extras import execute_values
+
                 cur = conn.cursor()
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {_qi(schema)};")
                 cur.execute(
@@ -427,8 +464,14 @@ def _build_cell_index(tables: List[Tuple[str, pd.DataFrame, str]], company_id: O
                     if df is None or df.empty:
                         continue
                     phys = _physical_name(logical)
-                    cur.execute(f"DELETE FROM {_qi(schema)}.{_qi(CELL_INDEX)} WHERE table_name = %s;", (phys,))
-                    rows = [(v.lower(), phys, col, len(v), logical) for col, v in _iter_index_values(df)]
+                    cur.execute(
+                        f"DELETE FROM {_qi(schema)}.{_qi(CELL_INDEX)} WHERE table_name = %s;",
+                        (phys,),
+                    )
+                    rows = [
+                        (v.lower(), phys, col, len(v), logical)
+                        for col, v in _iter_index_values(df)
+                    ]
                     if rows:
                         execute_values(
                             cur,
@@ -436,7 +479,9 @@ def _build_cell_index(tables: List[Tuple[str, pd.DataFrame, str]], company_id: O
                             f"(value_norm, table_name, column_name, val_len, source_key) VALUES %s",
                             rows,
                         )
-                logger.info(f"[pg] cell index built for {len(tables)} table(s), tenant '{company_id}'")
+                logger.info(
+                    f"[pg] cell index built for {len(tables)} table(s), tenant '{company_id}'"
+                )
             finally:
                 conn.close()
         else:
@@ -448,12 +493,19 @@ def _build_cell_index(tables: List[Tuple[str, pd.DataFrame, str]], company_id: O
                     f"CREATE TABLE IF NOT EXISTS {CELL_INDEX} "
                     f"(value_norm TEXT, table_name TEXT, column_name TEXT, val_len INT, source_key TEXT);"
                 )
-                cur.execute(f"CREATE INDEX IF NOT EXISTS cellidx_value ON {CELL_INDEX}(value_norm);")
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS cellidx_value ON {CELL_INDEX}(value_norm);"
+                )
                 for logical, df, _title in tables:
                     if df is None or df.empty:
                         continue
-                    cur.execute(f"DELETE FROM {CELL_INDEX} WHERE table_name = ?", (logical,))
-                    rows = [(v.lower(), logical, col, len(v), logical) for col, v in _iter_index_values(df)]
+                    cur.execute(
+                        f"DELETE FROM {CELL_INDEX} WHERE table_name = ?", (logical,)
+                    )
+                    rows = [
+                        (v.lower(), logical, col, len(v), logical)
+                        for col, v in _iter_index_values(df)
+                    ]
                     if rows:
                         cur.executemany(
                             f"INSERT INTO {CELL_INDEX} (value_norm, table_name, column_name, val_len, source_key) "
@@ -476,7 +528,8 @@ def _drop_cell_index_for_file(filename: str, company_id: Optional[str]):
             try:
                 cur = conn.cursor()
                 cur.execute(
-                    f"DELETE FROM {_qi(schema)}.{_qi(CELL_INDEX)} WHERE source_key LIKE %s;", (prefix + "%",)
+                    f"DELETE FROM {_qi(schema)}.{_qi(CELL_INDEX)} WHERE source_key LIKE %s;",
+                    (prefix + "%",),
                 )
             finally:
                 conn.close()
@@ -491,7 +544,9 @@ def _drop_cell_index_for_file(filename: str, company_id: Optional[str]):
                     f"CREATE TABLE IF NOT EXISTS {CELL_INDEX} "
                     f"(value_norm TEXT, table_name TEXT, column_name TEXT, val_len INT, source_key TEXT);"
                 )
-                cur.execute(f"DELETE FROM {CELL_INDEX} WHERE source_key LIKE ?", (prefix + "%",))
+                cur.execute(
+                    f"DELETE FROM {CELL_INDEX} WHERE source_key LIKE ?", (prefix + "%",)
+                )
                 conn.commit()
             finally:
                 conn.close()
@@ -505,6 +560,10 @@ def cell_lookup(question: str, company_id: str = None) -> Optional[dict]:
     the question, and return {table, column, value} for it — so a bare value like
     'Head-Wholesale Credit-CB' routes straight to the table+column that contains it
     without depending on the LLM or embeddings. Persisted → works after restarts.
+
+    Handles legacy ".0" suffix: old cell index rows stored "60593501.0" but users
+    type "60593501". We match BOTH the raw value_norm AND a ".0"-stripped variant
+    so lookups work regardless of when the cell index was built.
     """
     q = (question or "").lower()
     if len(q) < 3:
@@ -516,9 +575,15 @@ def cell_lookup(question: str, company_id: str = None) -> Optional[dict]:
             try:
                 cur = conn.cursor()
                 cur.execute(
-                    f"SELECT table_name, column_name, value_norm FROM {_qi(schema)}.{_qi(CELL_INDEX)} "
-                    f"WHERE strpos(%s, value_norm) > 0 ORDER BY val_len DESC LIMIT 1;",
-                    (q,),
+                    f"SELECT table_name, column_name, value_norm, "
+                    f"CASE WHEN value_norm LIKE '%.0' AND length(value_norm) > 2 "
+                    f"  AND value_norm ~ '^[0-9]+\\.0$' "
+                    f"  THEN length(value_norm) - 2 ELSE length(value_norm) END AS effective_len "
+                    f"FROM {_qi(schema)}.{_qi(CELL_INDEX)} "
+                    f"WHERE strpos(%s, value_norm) > 0 "
+                    f"   OR (value_norm LIKE '%.0' AND strpos(%s, regexp_replace(value_norm, '\\.0$', '')) > 0) "
+                    f"ORDER BY effective_len DESC LIMIT 1;",
+                    (q, q),
                 )
                 row = cur.fetchone()
             finally:
@@ -531,16 +596,21 @@ def cell_lookup(question: str, company_id: str = None) -> Optional[dict]:
             try:
                 cur = conn.cursor()
                 cur.execute(
-                    f"SELECT table_name, column_name, value_norm FROM {CELL_INDEX} "
-                    f"WHERE instr(?, value_norm) > 0 ORDER BY val_len DESC LIMIT 1;",
-                    (q,),
+                    f"SELECT table_name, column_name, value_norm, "
+                    f"CASE WHEN value_norm LIKE '%.0' AND length(value_norm) > 2 "
+                    f"  THEN length(value_norm) - 2 ELSE length(value_norm) END AS effective_len "
+                    f"FROM {CELL_INDEX} "
+                    f"WHERE instr(?, value_norm) > 0 "
+                    f"   OR (value_norm LIKE '%.0' AND instr(?, replace(value_norm, '.0', '')) > 0) "
+                    f"ORDER BY effective_len DESC LIMIT 1;",
+                    (q, q),
                 )
                 row = cur.fetchone()
             finally:
                 conn.close()
         if row:
             val = str(row[2]).strip()
-            if val.endswith('.0') and val[:-2].isdigit():
+            if val.endswith(".0") and val[:-2].isdigit():
                 val = val[:-2]
             return {"table": row[0], "column": row[1], "value": val}
     except Exception as e:
@@ -549,16 +619,28 @@ def cell_lookup(question: str, company_id: str = None) -> Optional[dict]:
 
 
 def get_router_schema(company_id: str = None) -> Dict[str, dict]:
-    return _pg_router_schema(company_id) if use_postgres() else _sqlite_router_schema(company_id)
+    return (
+        _pg_router_schema(company_id)
+        if use_postgres()
+        else _sqlite_router_schema(company_id)
+    )
 
 
 def execute_select(sql: str, company_id: str = None) -> Tuple[List[str], list]:
-    return _pg_execute_select(sql, company_id) if use_postgres() else _sqlite_execute_select(sql, company_id)
+    return (
+        _pg_execute_select(sql, company_id)
+        if use_postgres()
+        else _sqlite_execute_select(sql, company_id)
+    )
+
 
 # ── Analytical Engine Interface & Inverted Cell Index ──
 class AnalyticalEngine:
     """Database-Agnostic Analytical Engine interface."""
-    def load_tables(self, tables: List[Tuple[str, pd.DataFrame, str]], company_id: str = None):
+
+    def load_tables(
+        self, tables: List[Tuple[str, pd.DataFrame, str]], company_id: str = None
+    ):
         raise NotImplementedError
 
     def delete_tables_for_file(self, filename: str, company_id: str = None):
@@ -567,8 +649,11 @@ class AnalyticalEngine:
     def get_router_schema(self, company_id: str = None) -> Dict[str, dict]:
         raise NotImplementedError
 
-    def execute_select(self, sql: str, company_id: str = None) -> Tuple[List[str], list]:
+    def execute_select(
+        self, sql: str, company_id: str = None
+    ) -> Tuple[List[str], list]:
         raise NotImplementedError
+
 
 class InvertedCellIndex:
     """
@@ -576,6 +661,7 @@ class InvertedCellIndex:
     Maps tokens -> List of (db_table_name, col_name, row_idx, cell_value)
     and stores full row dicts to format complete Markdown table hits.
     """
+
     def __init__(self):
         self._index: Dict[str, List[Tuple[str, str, int, str]]] = {}
         self._rows: Dict[Tuple[str, int], Dict[str, str]] = {}
@@ -592,32 +678,68 @@ class InvertedCellIndex:
                 row_dict[str(col_name)] = val_str
                 if not val_str or len(val_str) < 2:
                     continue
-                
+
                 # Index exact value and tokens
-                raw_tokens = set(re.split(r'[^\w]+', val_str.lower()))
+                raw_tokens = set(re.split(r"[^\w]+", val_str.lower()))
                 tokens = {t for t in raw_tokens if t}
                 tokens.add(val_str.lower())
-                
+
                 for t in tokens:
                     if len(t) >= 2:
                         if t not in self._index:
                             self._index[t] = []
                         if len(self._index[t]) < 100:
-                            self._index[t].append((db_table_name, str(col_name), int(row_idx), val_str))
-            
+                            self._index[t].append(
+                                (db_table_name, str(col_name), int(row_idx), val_str)
+                            )
+
             self._rows[(db_table_name, int(row_idx))] = row_dict
 
     def search(self, query: str) -> List[Tuple[str, str, int, str]]:
         stopwords = {
-            "what", "can", "you", "tell", "me", "about", "job", "id", "code", "name",
-            "the", "a", "an", "is", "are", "of", "in", "for", "to", "with", "on", "at",
-            "by", "from", "show", "get", "find", "list", "give", "details", "info",
-            "information", "value", "entry", "record", "data", "sheet", "table"
+            "what",
+            "can",
+            "you",
+            "tell",
+            "me",
+            "about",
+            "job",
+            "id",
+            "code",
+            "name",
+            "the",
+            "a",
+            "an",
+            "is",
+            "are",
+            "of",
+            "in",
+            "for",
+            "to",
+            "with",
+            "on",
+            "at",
+            "by",
+            "from",
+            "show",
+            "get",
+            "find",
+            "list",
+            "give",
+            "details",
+            "info",
+            "information",
+            "value",
+            "entry",
+            "record",
+            "data",
+            "sheet",
+            "table",
         }
-        raw_tokens = set(re.split(r'[^\w]+', query.lower()))
+        raw_tokens = set(re.split(r"[^\w]+", query.lower()))
         all_tokens = {t for t in raw_tokens if t}
         all_tokens.add(query.strip().lower())
-        
+
         # Separate high-specificity tokens (numbers, codes, non-stopwords) from stopwords
         high_spec_tokens = {t for t in all_tokens if t not in stopwords and len(t) >= 2}
         low_spec_tokens = all_tokens - high_spec_tokens
@@ -644,12 +766,46 @@ class InvertedCellIndex:
             return ""
 
         stopwords = {
-            "what", "can", "you", "tell", "me", "about", "job", "id", "code", "name",
-            "the", "a", "an", "is", "are", "of", "in", "for", "to", "with", "on", "at",
-            "by", "from", "show", "get", "find", "list", "give", "details", "info",
-            "information", "value", "entry", "record", "data", "sheet", "table"
+            "what",
+            "can",
+            "you",
+            "tell",
+            "me",
+            "about",
+            "job",
+            "id",
+            "code",
+            "name",
+            "the",
+            "a",
+            "an",
+            "is",
+            "are",
+            "of",
+            "in",
+            "for",
+            "to",
+            "with",
+            "on",
+            "at",
+            "by",
+            "from",
+            "show",
+            "get",
+            "find",
+            "list",
+            "give",
+            "details",
+            "info",
+            "information",
+            "value",
+            "entry",
+            "record",
+            "data",
+            "sheet",
+            "table",
         }
-        query_words = set(re.split(r'[^\w]+', query.lower()))
+        query_words = set(re.split(r"[^\w]+", query.lower()))
         specific_words = {w for w in query_words if w not in stopwords and len(w) >= 2}
 
         # Score matching rows based on token specificity & exact string matches
@@ -684,8 +840,10 @@ class InvertedCellIndex:
             row_scores[row_key] = max(row_scores.get(row_key, 0.0), score)
 
         # Sort row keys by score descending
-        sorted_row_keys = sorted(row_scores.keys(), key=lambda k: row_scores[k], reverse=True)
-        
+        sorted_row_keys = sorted(
+            row_scores.keys(), key=lambda k: row_scores[k], reverse=True
+        )
+
         # Filter out rows with negligible score if high-scoring rows exist
         max_score = row_scores[sorted_row_keys[0]] if sorted_row_keys else 0.0
         if max_score >= 5.0:
@@ -705,7 +863,7 @@ class InvertedCellIndex:
         markdown_blocks = []
         for db_table_name, rows_list in table_rows.items():
             cols = self._table_columns.get(db_table_name, list(rows_list[0][1].keys()))
-            
+
             # Format as Markdown table
             hdr_line = "| " + " | ".join(cols) + " |"
             sep_line = "| " + " | ".join(["---"] * len(cols)) + " |"
@@ -736,7 +894,7 @@ class InvertedCellIndex:
             e_clean = entity.strip().lower()
             if not e_clean:
                 continue
-            raw_tokens = set(re.split(r'[^\w]+', e_clean))
+            raw_tokens = set(re.split(r"[^\w]+", e_clean))
             raw_tokens.add(e_clean)
 
             for t in raw_tokens:
@@ -747,12 +905,18 @@ class InvertedCellIndex:
                         if row_dict:
                             # Only include if extracted entity string is actually in the row values
                             row_vals_concat = " ".join(row_dict.values()).lower()
-                            if e_clean in row_vals_concat or any(sub in row_vals_concat for sub in raw_tokens if len(sub) >= 3):
+                            if e_clean in row_vals_concat or any(
+                                sub in row_vals_concat
+                                for sub in raw_tokens
+                                if len(sub) >= 3
+                            ):
                                 row_data_map[row_key] = row_dict
 
         # Guard: If entity search matched > max_hits rows, treat as a broad filter and defer to SQL Router
         if len(row_data_map) > max_hits:
-            logger.info(f"[USIE Cell Index] Entity search matched {len(row_data_map)} rows (> {max_hits} max). Deferring to SQL Router.")
+            logger.info(
+                f"[USIE Cell Index] Entity search matched {len(row_data_map)} rows (> {max_hits} max). Deferring to SQL Router."
+            )
             return ""
 
         if not row_data_map:
@@ -782,5 +946,6 @@ class InvertedCellIndex:
             markdown_blocks.append(block)
 
         return "\n\n".join(markdown_blocks)
+
 
 GLOBAL_CELL_INDEX = InvertedCellIndex()

@@ -15,16 +15,73 @@ from backend.src.rag_engine import get_engine
 from backend.src.excel_parser import sanitize_name
 
 # SQL reserved words that must always be double-quoted when used as identifiers
-_SQL_RESERVED = frozenset({
-    "values", "value", "select", "from", "where", "table", "order", "group",
-    "index", "distinct", "key", "references", "check", "primary", "foreign",
-    "unique", "default", "column", "row", "join", "inner", "outer", "left",
-    "right", "on", "as", "set", "insert", "update", "delete", "create", "drop",
-    "alter", "view", "trigger", "all", "any", "exists", "in", "like", "not",
-    "and", "or", "is", "null", "true", "false", "case", "when", "then", "else",
-    "end", "limit", "offset", "having", "union", "except", "intersect",
-    "natural", "cross", "full", "with", "recursive"
-})
+_SQL_RESERVED = frozenset(
+    {
+        "values",
+        "value",
+        "select",
+        "from",
+        "where",
+        "table",
+        "order",
+        "group",
+        "index",
+        "distinct",
+        "key",
+        "references",
+        "check",
+        "primary",
+        "foreign",
+        "unique",
+        "default",
+        "column",
+        "row",
+        "join",
+        "inner",
+        "outer",
+        "left",
+        "right",
+        "on",
+        "as",
+        "set",
+        "insert",
+        "update",
+        "delete",
+        "create",
+        "drop",
+        "alter",
+        "view",
+        "trigger",
+        "all",
+        "any",
+        "exists",
+        "in",
+        "like",
+        "not",
+        "and",
+        "or",
+        "is",
+        "null",
+        "true",
+        "false",
+        "case",
+        "when",
+        "then",
+        "else",
+        "end",
+        "limit",
+        "offset",
+        "having",
+        "union",
+        "except",
+        "intersect",
+        "natural",
+        "cross",
+        "full",
+        "with",
+        "recursive",
+    }
+)
 
 
 def _quote_col(col: str) -> str:
@@ -54,12 +111,17 @@ def sanitize_sql(sql: str, schema_map: dict) -> str:
         # Quote bare reserved-word column references not already quoted
         # e.g. LOWER(values) -> LOWER("values"), "values" stays "values"
         sql = re.sub(
-            r'(?<!\.)(\b' + re.escape(col) + r'\b)(?!\s*")',
-            lambda m: f'"{m.group(1)}"' if not (m.start() > 0 and sql[m.start()-1] == '"') else m.group(1),
+            r"(?<!\.)(\b" + re.escape(col) + r'\b)(?!\s*")',
+            lambda m: (
+                f'"{m.group(1)}"'
+                if not (m.start() > 0 and sql[m.start() - 1] == '"')
+                else m.group(1)
+            ),
             sql,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
     return sql
+
 
 def _persona(company_display: str) -> str:
     """Shared system-prompt preamble that locks the assistant to one customer
@@ -76,16 +138,18 @@ ANSWER STYLE — TECHNICAL, NOT SALES:
 - Do NOT give generic product overviews, marketing, or sales framing. Prefer the concrete "how it is configured for {company_display}" over "what the product can do in general"."""
 
 
-
-
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-NO_ANSWER = "I couldn't find this information in our meeting archives or knowledge base."
+NO_ANSWER = (
+    "I couldn't find this information in our meeting archives or knowledge base."
+)
+
 
 def _sse(obj: dict) -> str:
     """Encode a dict as one Server-Sent-Events frame."""
     return f"data: {json.dumps(obj)}\n\n"
+
 
 async def _single_message_stream(text: str, sources: list = None):
     """Emit a sources frame, one token frame, and done — used for graceful states."""
@@ -93,13 +157,16 @@ async def _single_message_stream(text: str, sources: list = None):
     yield _sse({"type": "token", "text": text})
     yield _sse({"type": "done"})
 
+
 class QueryFilters(BaseModel):
     department: Optional[str] = None
     date_from: Optional[str] = None  # Expects YYYY-MM-DD
 
+
 class QueryPayload(BaseModel):
     query: str
     filters: Optional[QueryFilters] = None
+
 
 # ── USIE Query Pipeline Components (Milestone 5) ──
 def rewrite_query_intent(query_text: str) -> str:
@@ -108,9 +175,10 @@ def rewrite_query_intent(query_text: str) -> str:
     Expands implicit intent into explicit natural language search target.
     """
     q_clean = query_text.strip()
-    if re.match(r'^(how many|total number of|count of)\s+', q_clean, re.IGNORECASE):
+    if re.match(r"^(how many|total number of|count of)\s+", q_clean, re.IGNORECASE):
         return f"Count total records and entries matching: {q_clean}"
     return q_clean
+
 
 def normalize_query_entities(query_text: str, schema_map: dict) -> str:
     """
@@ -119,21 +187,22 @@ def normalize_query_entities(query_text: str, schema_map: dict) -> str:
     """
     if not schema_map:
         return query_text
-    
+
     samples = []
     for _, info in schema_map.items():
         for col in info.get("columns", []):
-            for s in (col.get("samples") or []):
+            for s in col.get("samples") or []:
                 if len(str(s)) >= 3:
                     samples.append(str(s))
-                    
+
     normalized = query_text
     for sample in samples:
         pattern = re.escape(sample)
         if re.search(pattern, query_text, re.IGNORECASE):
             continue
-            
+
     return normalized
+
 
 def fast_path_intent_router(query_text: str, schema_map: dict) -> Optional[dict]:
     """
@@ -142,10 +211,13 @@ def fast_path_intent_router(query_text: str, schema_map: dict) -> Optional[dict]
     """
     if not schema_map or len(schema_map) > 5:
         return None
-        
+
     q_lower = query_text.lower()
-    
-    match_count = re.search(r'how many (values|entries|rows|records) (in|are in) (the )?([a-z0-9_ ]+)', q_lower)
+
+    match_count = re.search(
+        r"how many (values|entries|rows|records) (in|are in) (the )?([a-z0-9_ ]+)",
+        q_lower,
+    )
     if match_count:
         target_name = match_count.group(4).strip()
         for t_name, info in schema_map.items():
@@ -154,10 +226,13 @@ def fast_path_intent_router(query_text: str, schema_map: dict) -> Optional[dict]
                 sql = f'SELECT COUNT(*) FROM "{t_name}"'
                 logger.info(f"Fast-Path Intent Router generated SQL: {sql}")
                 return {"route": "SQL", "sql_query": sql}
-                
+
     return None
 
-def verify_retrieval_results(sql_result: Optional[dict], query_text: str, company_id: str = None) -> Optional[dict]:
+
+def verify_retrieval_results(
+    sql_result: Optional[dict], query_text: str, company_id: str = None
+) -> Optional[dict]:
     """
     Verification Stage:
     Checks if primary SQL query returned 0 rows or failed.
@@ -165,21 +240,34 @@ def verify_retrieval_results(sql_result: Optional[dict], query_text: str, compan
     """
     if not sql_result:
         return None
-        
-    formatted = str(sql_result.get("formatted_result") or sql_result.get("results_markdown") or "")
-    if "0 rows" in formatted.lower() or "no rows returned" in formatted.lower() or "0 records" in formatted.lower():
-        logger.info(f"Verification Stage: SQL returned 0 rows for query '{query_text}'. Triggering cell_lookup fallback.")
+
+    formatted = str(
+        sql_result.get("formatted_result") or sql_result.get("results_markdown") or ""
+    )
+    if (
+        "0 rows" in formatted.lower()
+        or "no rows returned" in formatted.lower()
+        or "0 records" in formatted.lower()
+    ):
+        logger.info(
+            f"Verification Stage: SQL returned 0 rows for query '{query_text}'. Triggering cell_lookup fallback."
+        )
         hit = table_store.cell_lookup(query_text, company_id)
         if hit:
             tbl, col, val = hit["table"], hit["column"], hit["value"]
-            fast_sql = f'SELECT * FROM "{tbl}" WHERE LOWER("{col}") LIKE \'%{val}%\' LIMIT 40'
+            fast_sql = (
+                f'SELECT * FROM "{tbl}" WHERE LOWER("{col}") LIKE \'%{val}%\' LIMIT 40'
+            )
             schema_map = table_store.get_router_schema(company_id)
             fast_sql = sanitize_sql(fast_sql, schema_map)
-            res = _execute_and_format(fast_sql, schema_map, company_id, route="CELL_INDEX")
+            res = _execute_and_format(
+                fast_sql, schema_map, company_id, route="CELL_INDEX"
+            )
             if res:
                 return res
-            
+
     return sql_result
+
 
 def voyage_rerank(query: str, documents: List[str], top_k: int = 5) -> List[str]:
     """Rerank candidate document chunks using Voyage AI rerank-2 API."""
@@ -189,20 +277,23 @@ def voyage_rerank(query: str, documents: List[str], top_k: int = 5) -> List[str]
     try:
         import urllib.request
         import json
+
         url = "https://api.voyageai.com/v1/rerank"
-        payload = json.dumps({
-            "model": "rerank-2",
-            "query": query,
-            "documents": documents,
-            "top_k": min(top_k, len(documents))
-        }).encode("utf-8")
+        payload = json.dumps(
+            {
+                "model": "rerank-2",
+                "query": query,
+                "documents": documents,
+                "top_k": min(top_k, len(documents)),
+            }
+        ).encode("utf-8")
         req = urllib.request.Request(
             url,
             data=payload,
             headers={
                 "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
+                "Content-Type": "application/json",
+            },
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -217,7 +308,10 @@ def voyage_rerank(query: str, documents: List[str], top_k: int = 5) -> List[str]
         logger.warning(f"Voyage rerank failed: {e}. Returning raw top documents.")
         return documents[:top_k]
 
-def _match_sources(sql: str, schema_map: dict, company_id: str, results_md: str) -> list:
+
+def _match_sources(
+    sql: str, schema_map: dict, company_id: str, results_md: str
+) -> list:
     """Map the tables referenced in a SQL string back to their source files (for UI citations)."""
     matched_files = []
     sql_lower = (sql or "").lower()
@@ -232,16 +326,20 @@ def _match_sources(sql: str, schema_map: dict, company_id: str, results_md: str)
                     break
     sources = []
     for f in set(matched_files):
-        sources.append({
-            "filename": f,
-            "relative_path": f"./backend/knowledge_base/{f}",
-            "exact_snippet_text": f"SQL Query: {sql}\n\nResults:\n{results_md}",
-            "score": 1.0,
-        })
+        sources.append(
+            {
+                "filename": f,
+                "relative_path": f"./backend/knowledge_base/{f}",
+                "exact_snippet_text": f"SQL Query: {sql}\n\nResults:\n{results_md}",
+                "score": 1.0,
+            }
+        )
     return sources
 
 
-def _execute_and_format(sql: str, schema_map: dict, company_id: str, route: str = "SQL") -> Optional[dict]:
+def _execute_and_format(
+    sql: str, schema_map: dict, company_id: str, route: str = "SQL"
+) -> Optional[dict]:
     """Run a SELECT against the tenant's Tier-C tables, format the rows as markdown,
     attach source citations. Returns None on error or empty/all-null result so the
     caller can fall back. Shared by the exact-value fast-path and the LLM SQL path."""
@@ -252,8 +350,11 @@ def _execute_and_format(sql: str, schema_map: dict, company_id: str, route: str 
         return None
 
     is_empty = True
-    for r in (rows or []):
-        if any(v is not None and str(v).strip() != "" and str(v).lower() != "none" for v in r):
+    for r in rows or []:
+        if any(
+            v is not None and str(v).strip() != "" and str(v).lower() != "none"
+            for v in r
+        ):
             is_empty = False
             break
     if not rows or is_empty:
@@ -276,13 +377,15 @@ def _execute_and_format(sql: str, schema_map: dict, company_id: str, route: str 
 async def route_and_execute(query_text: str, company_id: str = None) -> Optional[dict]:
     # ── USIE v4 TELEMETRY LOGGING & ENTITY EXTRACTION ──
     t0 = datetime.now()
-    
+
     # Count/aggregation queries must bypass the exact-value fast-path so the SQL
     # router can compute exact counts/sums rather than dumping matching rows.
-    is_count_query = bool(re.search(
-        r'\b(how many|count|total number of|sum of|average of|avg of|unique|distinct|list all)\b',
-        query_text.lower(),
-    ))
+    is_count_query = bool(
+        re.search(
+            r"\b(how many|count|total number of|sum of|average of|avg of|unique|distinct|list all)\b",
+            query_text.lower(),
+        )
+    )
 
     try:
         schema_map = table_store.get_router_schema(company_id)
@@ -297,8 +400,8 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
     # Intentionally narrow: only fires for high-level listing questions, NOT for
     # "what entries exist in X" (those go to LLM SQL to query the actual table).
     meta_patterns = [
-        r'\b(what|which|list|show)\s+(sheets?|tables?|workbooks?|files?)\s*(are\s*)?(available|exist|there|in|present)',
-        r'\b(sheets?|tables?|workbooks?)\s+(available|exist|present|in this)',
+        r"\b(what|which|list|show)\s+(sheets?|tables?|workbooks?|files?)\s*(are\s*)?(available|exist|there|in|present)",
+        r"\b(sheets?|tables?|workbooks?)\s+(available|exist|present|in this)",
     ]
     is_meta_question = any(re.search(p, query_text.lower()) for p in meta_patterns)
     if is_meta_question and schema_map:
@@ -323,99 +426,115 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
     # actual schema_map titles, and queries that table directly — so the LLM never
     # needs to guess a table name (which causes 'no such table' errors).
     sheet_ref_match = re.search(
-        r'(?:find|show|get|list|what(?:\'s|\s+is|\s+are)?|tell\s+me\s+about|info(?:rmation)?\s+on|details\s+on|entries\s+in|data\s+in|records\s+in|about)?\s*(?:the\s+)?([a-zA-Z][a-zA-Z0-9 _-]{2,40}?)\s+(?:sheet|table|tab)\b',
-        query_text, re.IGNORECASE
+        r"(?:find|show|get|list|what(?:\'s|\s+is|\s+are)?|tell\s+me\s+about|info(?:rmation)?\s+on|details\s+on|entries\s+in|data\s+in|records\s+in|about)?\s*(?:the\s+)?([a-zA-Z][a-zA-Z0-9 _-]{2,40}?)\s+(?:sheet|table|tab)\b",
+        query_text,
+        re.IGNORECASE,
     )
     if sheet_ref_match and schema_map and not is_count_query:
         mentioned_raw = sheet_ref_match.group(1).strip().lower()
-        common_stop = {"ispl", "candidate", "details", "screen", "master", "values", "xlsx", "table", "sheet", "information", "data", "source", "file", "tab"}
-        mentioned_words = {w for w in re.split(r'[\s_\-]+', mentioned_raw) if w and w not in common_stop and len(w) >= 3}
+        common_stop = {
+            "ispl",
+            "candidate",
+            "details",
+            "screen",
+            "master",
+            "values",
+            "xlsx",
+            "table",
+            "sheet",
+            "information",
+            "data",
+            "source",
+            "file",
+            "tab",
+        }
+        mentioned_words = {
+            w
+            for w in re.split(r"[\s_\-]+", mentioned_raw)
+            if w and w not in common_stop and len(w) >= 3
+        }
         best_match_name: Optional[str] = None
         best_score = 0
         if mentioned_words:
             for t_name, info in schema_map.items():
                 title = (info.get("title") or "").lower()
                 slug = t_name.lower()
-                title_words = {w for w in re.split(r'[\s_\-]+', title) if w and len(w) >= 3}
-                slug_words = {w for w in re.split(r'[\s_\-]+', slug) if w and w not in common_stop and len(w) >= 3}
-                score = len(mentioned_words & title_words) * 3 + len(mentioned_words & slug_words)
+                title_words = {
+                    w for w in re.split(r"[\s_\-]+", title) if w and len(w) >= 3
+                }
+                slug_words = {
+                    w
+                    for w in re.split(r"[\s_\-]+", slug)
+                    if w and w not in common_stop and len(w) >= 3
+                }
+                score = len(mentioned_words & title_words) * 3 + len(
+                    mentioned_words & slug_words
+                )
                 if score > best_score:
                     best_score = score
                     best_match_name = t_name
         if best_match_name and best_score >= 2:
-            select_sql = sanitize_sql(f'SELECT * FROM "{best_match_name}" LIMIT 30', schema_map)
-            result = _execute_and_format(select_sql, schema_map, company_id, route="SHEET_LOOKUP")
+            select_sql = sanitize_sql(
+                f'SELECT * FROM "{best_match_name}" LIMIT 30', schema_map
+            )
+            result = _execute_and_format(
+                select_sql, schema_map, company_id, route="SHEET_LOOKUP"
+            )
             if result:
-                logger.info(f"[USIE] sheet-ref fast-path: '{mentioned_raw}' -> {best_match_name}")
+                logger.info(
+                    f"[USIE] sheet-ref fast-path: '{mentioned_raw}' -> {best_match_name}"
+                )
                 return result
 
-    # ── Exact-value fast-path (Gap 1+2) ──
+    # ── Exact-value fast-path ──
     # If a value in the question matches an indexed cell value (persisted,
-    # per-tenant — survives restarts), we know which table+column holds it. This is
-    # the deterministic fix for bare values / IDs / designations like
-    # "Head-Wholesale Credit-CB" that embeddings route poorly.
+    # per-tenant — survives restarts), we know which table+column holds it.
+    # Execute deterministic SQL IMMEDIATELY — no LLM guessing needed.
     id_hint = ""
+    cell_hit_table = None  # track table identified by cell index for Fix3
     if not is_count_query:
         hit = table_store.cell_lookup(query_text, company_id)
         if hit:
             value = hit["value"]
-            multiword = (" " in value) or ("-" in value)
-            short_lookup = len(query_text.split()) <= 5
             tbl = hit["table"]
             col = hit["column"]
+            cell_hit_table = tbl
+            safe_val = value.lower().replace("'", "''")
+
             # Determine all columns in the matched table for multi-column LIKE
             tbl_info = schema_map.get(tbl, {})
             tbl_cols = [c["name"] for c in tbl_info.get("columns", [])]
-            if multiword or short_lookup:
-                # Use the LONGEST meaningful token from the ORIGINAL QUERY (not just
-                # the indexed cell value) so searches like "Risk Certification" find
-                # rows containing that phrase, not just the generic matched token.
-                stopwords = {
-                    "what", "can", "you", "tell", "me", "about", "job", "id",
-                    "the", "a", "an", "is", "are", "of", "in", "for", "to",
-                    "with", "on", "at", "by", "from", "show", "get", "find",
-                    "list", "give", "details", "info", "information", "entry",
-                    "record", "data", "sheet", "table", "which", "does", "require"
-                }
-                q_tokens = [
-                    t for t in re.split(r'[\s,]+', query_text.lower())
-                    if t and t not in stopwords and len(t) >= 3
-                ]
-                # Pick the cell-matched value OR, if longer query tokens exist, build
-                # LIKE on the most specific multi-word phrase from query
-                search_val = value.lower()
-                if q_tokens:
-                    # Try the full meaningful phrase first
-                    phrase = " ".join(q_tokens)
-                    # Use phrase only if it is more specific than the matched value
-                    if len(phrase) > len(search_val):
-                        search_val = phrase
-                safe_val = search_val.replace("'", "''")
-                if tbl_cols:
-                    like_clauses = " OR ".join(
-                        f'LOWER("{c}") LIKE \'%{safe_val}%\''
-                        for c in tbl_cols
-                        if not c.startswith("__")  # skip internal meta cols
-                    )
-                    fast_sql = f'SELECT * FROM "{tbl}" WHERE {like_clauses} LIMIT 40'
-                else:
-                    tbl_esc = tbl.replace('"', '""')
-                    col_esc = col.replace('"', '""')
-                    fast_sql = f'SELECT * FROM "{tbl_esc}" WHERE LOWER("{col_esc}") LIKE \'%{safe_val}%\' LIMIT 40'
-                fast_sql = sanitize_sql(fast_sql, schema_map)
-                result = _execute_and_format(fast_sql, schema_map, company_id, route="CELL_INDEX")
-                if result:
-                    latency = (datetime.now() - t0).total_seconds() * 1000
-                    logger.info(
-                        f"[USIE] exact-value fast-path: '{value}' ->"
-                        f"{tbl}.{col} ({latency:.0f}ms)"
-                    )
-                    return result
-            else:
-                id_hint = (
-                    f"\nHint: the value '{value}' appears in table \"{tbl}\" "
-                    f"column \"{col}\" — use it if relevant."
+
+            if tbl_cols:
+                like_clauses = " OR ".join(
+                    f"LOWER(\"{c}\") LIKE '%{safe_val}%'"
+                    for c in tbl_cols
+                    if not c.startswith("__")
                 )
+                fast_sql = f'SELECT * FROM "{tbl}" WHERE {like_clauses} LIMIT 40'
+            else:
+                tbl_esc = tbl.replace('"', '""')
+                col_esc = col.replace('"', '""')
+                fast_sql = f'SELECT * FROM "{tbl_esc}" WHERE LOWER("{col_esc}") LIKE \'%{safe_val}%\' LIMIT 40'
+
+            fast_sql = sanitize_sql(fast_sql, schema_map)
+            result = _execute_and_format(
+                fast_sql, schema_map, company_id, route="CELL_INDEX"
+            )
+            if result:
+                latency = (datetime.now() - t0).total_seconds() * 1000
+                logger.info(
+                    f"[USIE] exact-value fast-path: '{value}' -> "
+                    f"{tbl}.{col} ({latency:.0f}ms)"
+                )
+                return result
+
+            # If direct SQL failed (wrong column, etc.), pass as hint to LLM
+            id_hint = (
+                f"\nHint: the value '{value}' appears in table \"{tbl}\" "
+                f'column "{col}" — use it if relevant. '
+                f'Try: SELECT * FROM "{tbl}" WHERE LOWER("{col}") LIKE \'%{safe_val}%\''
+            )
 
     # Step A: Query Rewriter & Step B: Entity Normalization
     rewritten_query = rewrite_query_intent(query_text)
@@ -429,7 +548,9 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
         try:
             cols, rows = table_store.execute_select(sql_query, company_id)
             res_str = f"Fast-Path SQL Executed: {sql_query}\nResult: {rows}"
-            return verify_retrieval_results({"route": "SQL", "formatted_result": res_str}, query_text, company_id)
+            return verify_retrieval_results(
+                {"route": "SQL", "formatted_result": res_str}, query_text, company_id
+            )
         except Exception as fast_err:
             logger.warning(f"Fast-Path SQL failed: {fast_err}, falling back to router")
 
@@ -438,7 +559,7 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
         table_overview = ""
         for t, info in schema_map.items():
             title = info.get("title")
-            title_str = f" (Title: \"{title}\")" if title else ""
+            title_str = f' (Title: "{title}")' if title else ""
             table_overview += f"- {t}{title_str}\n"
 
         shortlist_prompt = f"""You are a database table selector. Given the user's query and a list of available database tables, select up to 8 table names that are most relevant to answering the query.
@@ -450,21 +571,22 @@ User Query: {query_text}
 
 JSON Output format: {{"candidates": ["table_name_1", "table_name_2"]}}
 Output ONLY valid JSON."""
-        
+
         candidates = []
         for gkey in config.GROQ_API_KEYS:
             try:
                 from groq import Groq
+
                 client = Groq(api_key=gkey)
                 res = client.chat.completions.create(
                     model="llama-3.3-70b-versatile",
                     messages=[{"role": "user", "content": shortlist_prompt}],
                     temperature=0.0,
-                    max_tokens=100
+                    max_tokens=100,
                 )
                 txt = res.choices[0].message.content or ""
                 if "{" in txt:
-                    txt = txt[txt.find("{"):txt.rfind("}")+1]
+                    txt = txt[txt.find("{") : txt.rfind("}") + 1]
                     cdata = json.loads(txt)
                     candidates = cdata.get("candidates", [])
                     if candidates:
@@ -475,12 +597,13 @@ Output ONLY valid JSON."""
         if not candidates and config.GEMINI_API_KEY:
             try:
                 import google.generativeai as genai
+
                 genai.configure(api_key=config.GEMINI_API_KEY)
                 gmodel = genai.GenerativeModel("gemini-2.0-flash")
                 completion = gmodel.generate_content(shortlist_prompt)
                 txt = completion.text or ""
                 if "{" in txt:
-                    txt = txt[txt.find("{"):txt.rfind("}")+1]
+                    txt = txt[txt.find("{") : txt.rfind("}") + 1]
                     cdata = json.loads(txt)
                     candidates = cdata.get("candidates", [])
             except Exception as ge:
@@ -492,19 +615,39 @@ Output ONLY valid JSON."""
                 t_norm = t.lower()
                 t_title = (info.get("title") or "").lower()
                 for c in candidates:
-                    c_norm = re.sub(r'[^\w]+', '_', c.lower()).strip('_')
-                    c_words = [w for w in re.split(r'[\s_\-]+', c.lower()) if len(w) >= 3]
-                    if (c_norm and c_norm in t_norm) or (c.lower() and c.lower() in t_title) or any(w in t_norm for w in c_words):
+                    c_norm = re.sub(r"[^\w]+", "_", c.lower()).strip("_")
+                    c_words = [
+                        w for w in re.split(r"[\s_\-]+", c.lower()) if len(w) >= 3
+                    ]
+                    if (
+                        (c_norm and c_norm in t_norm)
+                        or (c.lower() and c.lower() in t_title)
+                        or any(w in t_norm for w in c_words)
+                    ):
                         filtered_schema[t] = info
                         break
             if filtered_schema:
                 schema_map = filtered_schema
 
+    # ── Force-include cell-index-identified table ──
+    # If cell_lookup found the exact table but LLM shortlisting filtered it out,
+    # re-add it. The cell index is deterministic — the LLM shouldn't override it.
+    if cell_hit_table and cell_hit_table not in schema_map:
+        try:
+            full_schema = table_store.get_router_schema(company_id)
+            if cell_hit_table in full_schema:
+                schema_map[cell_hit_table] = full_schema[cell_hit_table]
+                logger.info(
+                    f"[USIE] Force-included cell-index table '{cell_hit_table}' into schema"
+                )
+        except Exception:
+            pass
+
     # Construct schema description for the router prompt.
     schema_desc = ""
     for t, info in schema_map.items():
         title = info.get("title")
-        title_str = f" (Table Title: \"{title}\")" if title else ""
+        title_str = f' (Table Title: "{title}")' if title else ""
         schema_desc += f"Table: {t}{title_str}\nColumns:\n"
         for c in info.get("columns", []):
             samples = c.get("samples") or []
@@ -570,15 +713,16 @@ JSON Output:"""
     for gkey in config.GROQ_API_KEYS:
         try:
             from groq import Groq
+
             client = Groq(api_key=gkey)
             completion = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
                     {"role": "system", "content": system_msg},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": prompt},
                 ],
                 temperature=0.0,
-                max_tokens=300
+                max_tokens=300,
             )
             response_text = completion.choices[0].message.content
             logger.info(f"LLM Router Response: {response_text}")
@@ -586,52 +730,71 @@ JSON Output:"""
                 break
         except Exception:
             continue
-            
+
     if not response_text and config.GEMINI_API_KEY:
         try:
             import google.generativeai as genai
+
             genai.configure(api_key=config.GEMINI_API_KEY)
-            model = genai.GenerativeModel("gemini-2.0-flash", system_instruction=system_msg)
+            model = genai.GenerativeModel(
+                "gemini-2.0-flash", system_instruction=system_msg
+            )
             completion = model.generate_content(prompt)
             response_text = completion.text
         except Exception:
             pass
-            
+
     if not response_text:
         return None
-        
+
     try:
         clean_json = response_text.strip()
         if "```" in clean_json:
-            clean_json = re.sub(r'^```[a-zA-Z]*\n?|```$', '', clean_json, flags=re.MULTILINE).strip()
-        
-        json_match = re.search(r'\{.*\}', clean_json, re.DOTALL)
+            clean_json = re.sub(
+                r"^```[a-zA-Z]*\n?|```$", "", clean_json, flags=re.MULTILINE
+            ).strip()
+
+        json_match = re.search(r"\{.*\}", clean_json, re.DOTALL)
         if json_match:
             clean_json = json_match.group(0)
-            
+
         try:
             data = json.loads(clean_json, strict=False)
         except Exception:
             fixed_json = re.sub(r"\\'", "'", clean_json)
-            fixed_json = re.sub(r'\\([^"\\/bfnrtu])', r'\1', fixed_json)
+            fixed_json = re.sub(r'\\([^"\\/bfnrtu])', r"\1", fixed_json)
             data = json.loads(fixed_json, strict=False)
         if data.get("route") == "SQL" and data.get("sql_query"):
             sql = data["sql_query"]
             # For non-aggregate row lookups, replace selective column lists with SELECT *
             # so the full row context (including related IDs and certifications) is returned.
-            if re.search(r'^SELECT\s+(?!COUNT|SUM|AVG|MIN|MAX|DISTINCT).+?\s+FROM\b', sql, re.IGNORECASE) and "GROUP BY" not in sql.upper():
-                sql = re.sub(r'^SELECT\s+.+?\s+FROM\b', 'SELECT * FROM', sql, flags=re.IGNORECASE)
+            if (
+                re.search(
+                    r"^SELECT\s+(?!COUNT|SUM|AVG|MIN|MAX|DISTINCT).+?\s+FROM\b",
+                    sql,
+                    re.IGNORECASE,
+                )
+                and "GROUP BY" not in sql.upper()
+            ):
+                sql = re.sub(
+                    r"^SELECT\s+.+?\s+FROM\b", "SELECT * FROM", sql, flags=re.IGNORECASE
+                )
             # Sanitize reserved-word column names before execution
             sql = sanitize_sql(sql, schema_map)
             logger.info(f"Query-Time Router selected SQL path: {sql}")
             result = _execute_and_format(sql, schema_map, company_id)
             if result is None:
-                logger.info(f"SQL returned 0 rows / failed; falling back to vector search. SQL: {sql}")
+                logger.info(
+                    f"SQL returned 0 rows / failed; falling back to vector search. SQL: {sql}"
+                )
             return result
     except Exception as e:
-        logger.error(f"SQL Router execution failed: {e}. Falling back to semantic search.")
+        logger.error(
+            f"SQL Router execution failed: {e}. Falling back to semantic search."
+        )
 
     return None
+
 
 @router.post("/query")
 async def chat_query(
@@ -686,12 +849,16 @@ async def chat_query(
     if sql_result:
         # Stream using SQL results as context block
         sources = sql_result["sources"]
-        
+
         async def sql_chat_stream_generator():
             yield _sse({"type": "sources", "sources": sources})
-            
-            context_block = f"[Database Query Results]\n{sql_result['results_markdown']}"
-            system_prompt = _persona(company_display) + """
+
+            context_block = (
+                f"[Database Query Results]\n{sql_result['results_markdown']}"
+            )
+            system_prompt = (
+                _persona(company_display)
+                + """
 
 CRITICAL INSTRUCTIONS ON SOURCES AND CITATIONS:
 - NEVER include inline source citations, file names, dates, or source links in your response text (e.g. do NOT write things like '[Source: file.xlsx]', 'Source: ...', or reference filenames in parentheses).
@@ -702,17 +869,19 @@ CRITICAL INSTRUCTIONS ON COUNTING AND SUMMARIES:
 - Rely 100% on the SQL query results to state counts, averages, lists, or filters. They are exact and mathematically correct.
 - State the final answer clearly and directly in a human-friendly format.
 """
+            )
             user_prompt = f"""Context Snippets:
 {context_block}
 
 Question: {query_text}
 
 Answer:"""
-            
+
             streamed = False
             for i, gkey in enumerate(config.GROQ_API_KEYS, 1):
                 try:
                     from groq import Groq
+
                     client = Groq(api_key=gkey)
                     stream = client.chat.completions.create(
                         model="llama-3.3-70b-versatile",
@@ -736,10 +905,11 @@ Answer:"""
                         yield _sse({"type": "done"})
                         return
                     continue
-                    
+
             if config.GEMINI_API_KEY:
                 try:
                     import google.generativeai as genai
+
                     genai.configure(api_key=config.GEMINI_API_KEY)
                     model = genai.GenerativeModel(
                         "gemini-2.0-flash", system_instruction=system_prompt
@@ -755,14 +925,18 @@ Answer:"""
                         return
                 except Exception as e:
                     logger.error(f"Gemini SQL stream failed: {e}")
-                    
-            yield _sse({
-                "type": "token",
-                "text": "⚠️ LLMs failed to formulate natural language response."
-            })
+
+            yield _sse(
+                {
+                    "type": "token",
+                    "text": "⚠️ LLMs failed to formulate natural language response.",
+                }
+            )
             yield _sse({"type": "done"})
-            
-        return StreamingResponse(sql_chat_stream_generator(), media_type="text/event-stream")
+
+        return StreamingResponse(
+            sql_chat_stream_generator(), media_type="text/event-stream"
+        )
 
     # 2. Fallback Path: Standard Vector Search (Tiers A/B)
     retrieved = []
@@ -793,7 +967,7 @@ Answer:"""
     sources = []
     context_snippets = []
     used_chars = 0
-    
+
     # Deduplicate citations to prevent repeated badges
     seen_cite = set()
     for s in retrieved:
@@ -804,7 +978,7 @@ Answer:"""
             or os.path.basename(meta.get("source", ""))
             or "Unknown"
         )
-        
+
         # Unique identifier for the source chunk
         cite_key = (filename, meta.get("sheet_name") or meta.get("sheet"), content[:80])
         if cite_key in seen_cite:
@@ -858,9 +1032,7 @@ Answer:"""
             or (meta.get("indexed_at", "") or "")[:10]
             or "Unknown Date"
         )
-        context_snippets.append(
-            f"[Document {idx}: {filename}]\n{snippet}"
-        )
+        context_snippets.append(f"[Document {idx}: {filename}]\n{snippet}")
 
     # 4. Build the streaming generator (sources first, then LLM tokens).
     async def chat_stream_generator():
@@ -872,7 +1044,9 @@ Answer:"""
             else "(No context snippets found in the database.)"
         )
 
-        system_prompt = _persona(company_display) + f"""
+        system_prompt = (
+            _persona(company_display)
+            + f"""
 
 CRITICAL INSTRUCTIONS ON SOURCES AND CITATIONS:
 - NEVER include inline source citations, file names, dates, or source links in your response text (e.g. do NOT write things like '[Source: file.xlsx]', 'Source: ...', or reference filenames in parentheses).
@@ -895,6 +1069,7 @@ For specific questions about {company_display}, its documents, or its data:
 Do not make up facts outside the context.
 Do not use introductory phrases like "Based on the provided context..." or "According to the snippets...". Answer the user's question directly and concisely as a {company_display} technical specialist.
 """
+        )
 
         user_prompt = f"""Context Snippets:
 {context_block}

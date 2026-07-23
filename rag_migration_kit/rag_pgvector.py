@@ -155,13 +155,23 @@ def discover_files(directory: str) -> List[Dict]:
 
 # ---------------- DOCUMENT PROCESSORS ----------------
 def _render_sheet_rows(df) -> List[str]:
-    """One text line per row, dropping empty cells (read with header=None upstream)."""
+    """Render rows as explicit Key: Value pairs to preserve column alignment and eliminate ambiguity."""
+    if df.empty:
+        return []
+    
+    # Check if first row is header
+    headers = [str(c).strip() for c in df.iloc[0].tolist()]
     rows: List[str] = []
-    for _, r in df.iterrows():
-        cells = [str(v).strip() for v in r.tolist()]
-        cells = [c for c in cells if c and c.lower() != "nan"]
-        if cells:
-            rows.append(" | ".join(cells))
+    
+    for _, r in df.iloc[1:].iterrows():
+        kv_pairs = []
+        for h, val in zip(headers, r.tolist()):
+            val_str = str(val).strip()
+            if val_str and val_str.lower() != "nan" and val_str.lower() != "none":
+                kv_pairs.append(f"{h}: {val_str}")
+        if kv_pairs:
+            rows.append(" | ".join(kv_pairs))
+            
     return rows
 
 
@@ -200,7 +210,7 @@ def _sheet_to_chunks(sheet_name: str, df, overlap_rows: int = 2) -> List[str]:
 def process_excel(file_path: str) -> List[Dict]:
     """
     Process an Excel workbook using SmartExcelProcessor:
-    Returns pre-formatted key-value RAG chunks for vector store ingestion.
+    Returns pre-formatted key-value RAG chunks with merged cell resolution and header detection.
     """
     from backend.src.excel_parser import process_excel_file
     chunks, _ = process_excel_file(file_path)

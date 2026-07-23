@@ -668,14 +668,12 @@ Output ONLY valid JSON."""
                     f'SELECT * FROM "{t}" LIMIT 2', company_id
                 )
                 if example_rows and example_rows[1]:
-                    for ri, row in enumerate(example_rows[1][:2], 1):
-                        pairs = [
-                            f'{cn}="{str(v)[:50]}"'
-                            for cn, v in zip(example_rows[0], row)
-                        ]
-                        schema_desc += f"  Example Row {ri}: {', '.join(pairs)}\n"
-            except Exception:
-                pass
+                    schema_desc += "  Data Sample (row 1-2):\n"
+                    for row in example_rows[1][:2]:
+                        pairs = [f"{cn}: {str(v)[:50]}" for cn, v in zip(example_rows[0], row)]
+                        schema_desc += f"    {' | '.join(pairs)}\n"
+            except Exception as e:
+                logger.error(f"[Schema Enrichment] Failed to fetch sample rows: {e}")
 
         schema_desc += "\n"
 

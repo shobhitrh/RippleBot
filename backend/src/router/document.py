@@ -507,3 +507,62 @@ async def reindex_documents(background_tasks: BackgroundTasks, company_id: str =
         "company_id": company_id,
         "message": "Re-indexing process has been launched in the background."
     }
+
+
+@router.post("/purge")
+@router.delete("/purge")
+async def purge_company_knowledge_base(company_id: str = CompanyId):
+    """
+    Completely purge all documents, vector embeddings, relational SQL tables,
+    and durable file store for a tenant, giving a 100% clean slate.
+    """
+    company_id = config.normalize_company_id(company_id)
+    docs_dir = config.company_documents_dir(company_id)
+    
+    # 1. Delete physical files on disk & update file_store
+    if os.path.exists(docs_dir):
+        for f in os.listdir(docs_dir):
+            full_path = os.path.join(docs_dir, f)
+            try:
+                if os.path.isfile(full_path):
+                    os.remove(full_path)
+            except Exception as e:
+                logger.error(f"Error removing file {f}: {e}")
+        file_store.mirror_dir(company_id, docs_dir)
+
+    # 2. Delete vector store chunks & document records from PostgreSQL/Chroma
+    engine = get_engine(company_id, required=False)
+    if engine is not None:
+        try:
+            if hasattr(engine, "conn") and engine.conn:
+                cur = engine.conn.cursor()
+                cur.execute("DELETE FROM chunks WHERE company_id = %s;", (company_id,))
+                cur.execute("DELETE FROM documents WHERE company_id = %s;", (company_id,))
+                logger.info(f"Purged pgvector chunks and document records for tenant {company_id}")
+        except Exception as e:
+            logger.error(f"Error purging pgvector data: {e}")
+
+    # 3. Drop relational SQL schema in PostgreSQL / delete SQLite database
+    try:
+        from backend.src import table_store
+        schema = table_store._tenant_schema(company_id)
+        if table_store.use_postgres():
+            conn = table_store._pg_conn()
+            try:
+                cur = conn.cursor()
+                cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE;')
+                logger.info(f"Dropped schema '{schema}' for tenant {company_id}")
+            finally:
+                conn.close()
+        else:
+            db_path = table_store.get_db_path(company_id)
+            if os.path.exists(db_path):
+                os.remove(db_path)
+    except Exception as e:
+        logger.error(f"Error purging tenant SQL schema: {e}")
+
+    return {
+        "status": "success",
+        "company_id": company_id,
+        "message": f"Successfully purged all documents, vector embeddings, and relational SQL tables for company '{company_id}'. You now have a 100% clean slate!"
+    }

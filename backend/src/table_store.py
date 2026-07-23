@@ -224,11 +224,14 @@ def _pg_router_schema(company_id: Optional[str]) -> Dict[str, dict]:
             return {}  # no schema/metadata yet → no tables
 
         cur.execute(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = %s AND table_name <> %s;",
-            (schema, META_TABLE),
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = %s;",
+            (schema,),
         )
-        table_names = [r[0] for r in cur.fetchall()]
+        # Exclude internal bookkeeping tables (__table_metadata__, __cell_index__)
+        # so the LLM router can ONLY ever query real data tables — never the
+        # plumbing. Querying the index was what produced answers like REQ-020 →
+        # "Value Length: 7, Table Name, Source Key".
+        table_names = [r[0] for r in cur.fetchall() if not r[0].startswith("__")]
 
         for t in table_names:
             cur.execute(
@@ -350,7 +353,7 @@ def _sqlite_router_schema(company_id: Optional[str]) -> Dict[str, dict]:
         tables = [
             r[0]
             for r in cur.fetchall()
-            if not r[0].startswith("sqlite_") and r[0] != META_TABLE
+            if not r[0].startswith("sqlite_") and not r[0].startswith("__")
         ]
         if not tables:
             conn.close()

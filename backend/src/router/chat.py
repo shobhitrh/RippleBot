@@ -135,7 +135,7 @@ SCOPE — CUSTOMER ISOLATION (non-negotiable):
 
 CHATBOT TONE & BEAUTIFUL PRESENTATION RULES:
 - Always respond in a warm, polite, professional, and human-friendly conversational style.
-- ABSOLUTELY NEVER output raw internal database metadata, internal table names (e.g. 'pine_labs_handover_sheet_...', 'ispl_candidate_details_...', table hashes, or technical IDs), internal column names (e.g. 'cty_desc', 'col_0', 'id'), or technical debugging stats (e.g. 'Value Length of 7', 'Table Name', 'Source Key').
+- ABSOLUTELY NEVER output raw internal database metadata, internal table names (e.g. 'pine_labs_handover_sheet_...', 'ispl_candidate_details_...', table hashes, or technical IDs), internal column names (e.g. 'cty_desc', 'col_0', 'col_1', 'id', 'value_norm', 'column_name', 'table_name', 'val_len', 'source_key'), or technical debugging stats (e.g. 'Value Length of 7', 'Value Normalization', 'Table Name', 'Source Key'). If the ONLY data you were given looks like this internal bookkeeping, do NOT describe it — say you couldn't find the information instead.
 - Always translate database information into natural human sentences and clean business terms.
 - Use standard dash bullet points (`-`) for lists. ABSOLUTELY NEVER use single asterisks (`*`) for lists or formatting, as they break UI rendering. 
 - You MUST use double asterisks for bolding important keys or terms (e.g., `- **Field Name**: Value`).
@@ -358,6 +358,16 @@ def _execute_and_format(
     """Run a SELECT against the tenant's Tier-C tables, format the rows as markdown,
     attach source citations. Returns None on error or empty/all-null result so the
     caller can fall back. Shared by the exact-value fast-path and the LLM SQL path."""
+    # Grounding guardrail: the SQL must reference at least one REAL data table from
+    # the schema. If it references none — an internal/plumbing table or one the LLM
+    # invented — discard and fall back. This turns the observed "no source =
+    # hallucinated" signal into a hard rule, and is DB-based (not disk-dependent).
+    if schema_map:
+        sql_l = (sql or "").lower()
+        if not any(t.lower() in sql_l for t in schema_map):
+            logger.warning(f"Discarding SQL that references no known data table: {sql}")
+            return None
+
     try:
         col_names, rows = table_store.execute_select(sql, company_id)
     except Exception as e:

@@ -88,8 +88,27 @@ class UnifiedExcelRAGPipeline:
 
         if ext in ('.csv', '.tsv'):
             sep = '\t' if ext == '.tsv' else ','
+            df = None
+            # Try multiple encodings and delimiter fallbacks defensively
+            encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']
+            delimiters = [sep, ',', ';', '\t', '|'] if ext == '.csv' else ['\t', ',']
+            
+            for enc in encodings:
+                for d in delimiters:
+                    try:
+                        df_try = pd.read_csv(file_path, sep=d, encoding=enc, on_bad_lines='skip')
+                        if df_try is not None and not df_try.empty:
+                            df = df_try
+                            break
+                    except Exception:
+                        continue
+                if df is not None:
+                    break
+            
             try:
-                df = pd.read_csv(file_path, sep=sep)
+                if df is None:
+                    df = pd.read_csv(file_path, sep=sep, encoding_errors='ignore')
+                
                 df = df.dropna(how='all')
                 sheet_name = "Sheet1"
                 table_name = f"{file_stem}_{self.sanitize_name(sheet_name)}_table_1"

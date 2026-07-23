@@ -206,41 +206,11 @@ def _sheet_to_chunks(sheet_name: str, df, overlap_rows: int = 2) -> List[str]:
 
 def process_excel(file_path: str) -> List[Dict]:
     """
-    Process an Excel workbook: every sheet, every row. Reads with header=None so
-    free-form sheets (merged cells, section layouts) aren't garbled, renders rows
-    compactly, and chunks with overlap. Each chunk carries sheet + chunk_index so
-    the whole sheet can be reassembled in order for aggregation questions.
+    Process an Excel workbook using SmartExcelProcessor:
+    Returns pre-formatted key-value RAG chunks for vector store ingestion.
     """
-    chunks: List[Dict] = []
-    try:
-        with pd.ExcelFile(file_path) as excel_file:
-            for sheet_name in excel_file.sheet_names:
-                df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
-                df = df.dropna(how="all")  # drop fully-empty rows
-                if df.empty:
-                    continue
-
-                parts = _sheet_to_chunks(sheet_name, df)
-                for ci, part in enumerate(parts):
-                    chunks.append({
-                        "text": part,
-                        "metadata": {
-                            "source": file_path,
-                            "source_name": Path(file_path).name,
-                            "sheet": sheet_name,
-                            "type": "excel",
-                            "chunk_index": ci,
-                            "indexed_at": datetime.now().isoformat(),
-                        },
-                    })
-            logger.info(
-                f"✓ Processed {len(excel_file.sheet_names)} sheet(s) from "
-                f"{Path(file_path).name}, created {len(chunks)} chunks"
-            )
-    except Exception as e:
-        logger.error(f"Error processing Excel {file_path}: {e}")
-        raise DocumentProcessingError(f"Excel processing failed: {e}")
-
+    from backend.src.excel_parser import process_excel_file
+    chunks, _ = process_excel_file(file_path)
     return chunks
 
 def process_pdf(file_path: str) -> List[Dict]:

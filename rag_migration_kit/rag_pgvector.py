@@ -209,8 +209,8 @@ def _sheet_to_chunks(sheet_name: str, df, overlap_rows: int = 2) -> List[str]:
 
 def process_excel(file_path: str) -> List[Dict]:
     """
-    Process an Excel workbook using SmartExcelProcessor:
-    Returns pre-formatted key-value RAG chunks with merged cell resolution and header detection.
+    Process an Excel workbook using UnifiedExcelRAGPipeline:
+    Generates Unified Markdown, .md.gz archive, and header-injected RAG chunks.
     """
     from backend.src.excel_parser import process_excel_file
     chunks, _ = process_excel_file(file_path)

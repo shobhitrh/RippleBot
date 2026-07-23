@@ -266,13 +266,13 @@ def detect_csv_properties(file_path: str) -> Tuple[str, str]:
 
 def process_csv_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.DataFrame, str]]]:
     """
-    Parse a CSV file using SmartExcelProcessor.
-    Dynamically classifies content as TABULAR or DOCUMENT.
+    Parse a CSV file using UnifiedExcelRAGPipeline.
+    Generates Unified Markdown, .md.gz archive, and context-injected RAG chunks.
     Returns (chunks, sqlite_tables).
     """
-    from backend.src.smart_excel_processor import SmartExcelProcessor
-    processor = SmartExcelProcessor()
-    return processor.process_file(file_path)
+    from backend.src.unified_excel_pipeline import UnifiedExcelRAGPipeline
+    pipeline = UnifiedExcelRAGPipeline()
+    return pipeline.process_file(file_path)
 
 def is_key_value_block(df: pd.DataFrame) -> bool:
     """Detect if a dataframe is structured as a key-value block (e.g. metadata list)."""
@@ -460,13 +460,13 @@ def is_same_column_signature(cols_a: List[str], cols_b: List[str]) -> bool:
 
 def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.DataFrame, str]]]:
     """
-    Parse an Excel (.xlsx, .xls) workbook using SmartExcelProcessor.
-    Dynamically classifies sheets as TABULAR or DOCUMENT.
+    Parse an Excel (.xlsx, .xls) workbook using UnifiedExcelRAGPipeline.
+    Generates Unified Markdown, .md.gz archive, and context-injected RAG chunks.
     Returns (chunks, sqlite_tables).
     """
-    from backend.src.smart_excel_processor import SmartExcelProcessor
-    processor = SmartExcelProcessor()
-    return processor.process_file(file_path)
+    from backend.src.unified_excel_pipeline import UnifiedExcelRAGPipeline
+    pipeline = UnifiedExcelRAGPipeline()
+    return pipeline.process_file(file_path)
 
 def load_tables_to_sqlite(sqlite_tables: List[Tuple[str, pd.DataFrame, str]], company_id: str = None):
     """

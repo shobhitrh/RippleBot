@@ -42,6 +42,9 @@ chroma_db/
 *.db
 backend/ripplebot_tables.db
 ripplebot_tables.db
+unified_rag_pipeline_output/
+smart_output/
+smart_rag_output/
 
 # Node / Frontend
 node_modules/

@@ -295,18 +295,19 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
 
     # ── Schema meta-question fast-path ──
     # Handles "what sheets are available?", "what tables exist?", "list all sheets"
-    # These have no SQL table to query — answer directly from schema_map.
+    # Intentionally narrow: only fires for high-level listing questions, NOT for
+    # "what entries exist in X" (those go to LLM SQL to query the actual table).
     meta_patterns = [
-        r'\b(what|which|list|show).*(sheet|table|workbook|file|available|exist)',
-        r'\b(sheets|tables|workbooks).*(available|exist|present|in)',
-        r'\bfind.*(sheet|table|candidate type)',
+        r'\b(what|which|list|show)\s+(sheets?|tables?|workbooks?|files?)\s*(are\s*)?(available|exist|there|in|present)',
+        r'\b(sheets?|tables?|workbooks?)\s+(available|exist|present|in this)',
     ]
     is_meta_question = any(re.search(p, query_text.lower()) for p in meta_patterns)
     if is_meta_question and schema_map:
         titles = []
         for t_name, info in schema_map.items():
             title = info.get("title") or t_name
-            titles.append(f"- {title}")
+            # Include both the human title and the DB slug so validators can match either
+            titles.append(f"- {title} [{t_name}]")
         schema_list_md = "\n".join(titles)
         meta_result = {
             "route": "SCHEMA_META",
@@ -316,6 +317,43 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
         }
         logger.info(f"[USIE] schema-meta fast-path returned {len(titles)} tables")
         return meta_result
+
+    # ── Sheet / table reference fast-path ──
+    # Handles: "find info on Candidate Type sheet", "what is in the X table"
+    # Detects a sheet/table name mentioned in the query, fuzzy-matches it against
+    # actual schema_map titles, and queries that table directly — so the LLM never
+    # needs to guess a table name (which causes 'no such table' errors).
+    sheet_ref_match = re.search(
+        r'(?:find|show|get|list|what(?:\'s|\s+is|\s+are)?|tell\s+me\s+about|info(?:rmation)?\s+on|details\s+on|entries\s+in|data\s+in|records\s+in|about)?\s*(?:the\s+)?([a-zA-Z][a-zA-Z0-9 _-]{2,40}?)\s+(?:sheet|table|tab)\b',
+        query_text, re.IGNORECASE
+    )
+    if sheet_ref_match and schema_map and not is_count_query:
+        mentioned_raw = sheet_ref_match.group(1).strip().lower()
+        mentioned_words = set(re.split(r'[\s_\-]+', mentioned_raw))
+        best_match_name: Optional[str] = None
+        best_score = 0
+        for t_name, info in schema_map.items():
+            title = (info.get("title") or t_name).lower()
+            slug = t_name.lower()
+            title_words = set(re.split(r'[\s_\-]+', title))
+            slug_words = set(re.split(r'[\s_\-]+', slug))
+            score = len(mentioned_words & title_words) * 2 + len(mentioned_words & slug_words)
+            if score > best_score:
+                best_score = score
+                best_match_name = t_name
+        if best_match_name and best_score >= 2:  # require at least one title word match
+            select_sql = sanitize_sql(f'SELECT * FROM "{best_match_name}" LIMIT 30', schema_map)
+            result = _execute_and_format(select_sql, schema_map, company_id, route="SHEET_LOOKUP")
+            if result:
+                logger.info(f"[USIE] sheet-ref fast-path: '{mentioned_raw}' -> {best_match_name}")
+                return result
+
+    # ── Numeric ID fast-path guard ──
+    # If the query contains a long numeric ID (e.g. job ID 60593501), the cell index
+    # can't help (numeric columns aren't indexed as text). Skip CELL_INDEX to avoid
+    # false-positive hits on stopwords in the question, and let the LLM SQL router
+    # write the correct WHERE clause (which already works for these queries).
+    has_numeric_id = bool(re.search(r'\b\d{5,}\b', query_text))
 
     # ── Exact-value fast-path (Gap 1+2) ──
     # If a value in the question matches an indexed cell value (persisted,
@@ -327,7 +365,7 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
     #   • Otherwise (a single common word inside a longer NL question) → pass it to
     #     the LLM as a hint and let it decide, to avoid false-positive routing.
     id_hint = ""
-    if not is_count_query:
+    if not is_count_query and not has_numeric_id:
         hit = table_store.cell_lookup(query_text, company_id)
         if hit:
             value = hit["value"]
@@ -339,11 +377,33 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
             tbl_info = schema_map.get(tbl, {})
             tbl_cols = [c["name"] for c in tbl_info.get("columns", [])]
             if multiword or short_lookup:
-                # Build LIKE clauses across ALL text columns for robustness
-                val = value.replace("'", "''").lower()
+                # Use the LONGEST meaningful token from the ORIGINAL QUERY (not just
+                # the indexed cell value) so searches like "Risk Certification" find
+                # rows containing that phrase, not just the generic matched token.
+                stopwords = {
+                    "what", "can", "you", "tell", "me", "about", "job", "id",
+                    "the", "a", "an", "is", "are", "of", "in", "for", "to",
+                    "with", "on", "at", "by", "from", "show", "get", "find",
+                    "list", "give", "details", "info", "information", "entry",
+                    "record", "data", "sheet", "table", "which", "does", "require"
+                }
+                q_tokens = [
+                    t for t in re.split(r'[\s,]+', query_text.lower())
+                    if t and t not in stopwords and len(t) >= 3
+                ]
+                # Pick the cell-matched value OR, if longer query tokens exist, build
+                # LIKE on the most specific multi-word phrase from query
+                search_val = value.lower()
+                if q_tokens:
+                    # Try the full meaningful phrase first
+                    phrase = " ".join(q_tokens)
+                    # Use phrase only if it is more specific than the matched value
+                    if len(phrase) > len(search_val):
+                        search_val = phrase
+                safe_val = search_val.replace("'", "''")
                 if tbl_cols:
                     like_clauses = " OR ".join(
-                        f'LOWER("{c}") LIKE \'%{val}%\''
+                        f'LOWER("{c}") LIKE \'%{safe_val}%\''
                         for c in tbl_cols
                         if not c.startswith("__")  # skip internal meta cols
                     )
@@ -351,7 +411,7 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
                 else:
                     tbl_esc = tbl.replace('"', '""')
                     col_esc = col.replace('"', '""')
-                    fast_sql = f'SELECT * FROM "{tbl_esc}" WHERE LOWER("{col_esc}") LIKE \'%{val}%\' LIMIT 40'
+                    fast_sql = f'SELECT * FROM "{tbl_esc}" WHERE LOWER("{col_esc}") LIKE \'%{safe_val}%\' LIMIT 40'
                 fast_sql = sanitize_sql(fast_sql, schema_map)
                 result = _execute_and_format(fast_sql, schema_map, company_id, route="CELL_INDEX")
                 if result:
@@ -483,6 +543,7 @@ RULES:
 5. CRITICAL: NEVER combine aggregate functions (e.g. COUNT(*), SUM()) with un-aggregated column names in the same SELECT statement without a GROUP BY.
 6. TOTAL COUNT vs DISTINCT: When asked "How many values/entries/items/records in [table/field]", generate SELECT COUNT(*) FROM <table> to return the total row count (e.g. 176). Only use SELECT DISTINCT or COUNT(DISTINCT col) if the user explicitly includes words like "unique", "distinct", or "types of".
 7. Output ONLY the JSON block, no markdown, no other text.
+8. CRITICAL: For certification/qualification/requirement lookups (e.g. "which job requires X certification", "what certification does X need"), ALWAYS use SQL. Search across all relevant tables using LOWER(col) LIKE '%keyword%' WHERE the keyword is the certification or qualification name mentioned by the user.
 """
 
     prompt = f"""Available Database Schema:

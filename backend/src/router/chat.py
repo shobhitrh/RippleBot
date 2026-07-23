@@ -172,16 +172,26 @@ def voyage_rerank(query: str, documents: List[str], top_k: int = 5) -> List[str]
         return documents[:top_k]
 
 async def route_and_execute(query_text: str, company_id: str = None) -> Optional[dict]:
-    # ── USIE v3 TELEMETRY LOGGING ──
+    # ── USIE v4 TELEMETRY LOGGING & ENTITY EXTRACTION ──
     t0 = datetime.now()
     
-    # 0. Step A: Fast Inverted Cell Index Match (Sub-10ms Exact Identifier / Code Lookup)
-    cell_md = table_store.GLOBAL_CELL_INDEX.search_markdown(query_text)
+    # Step A: Query-Time Entity Extraction (Decouples phrasing/synonyms from database lookup)
+    from backend.src.router.entity_extractor import extract_query_entities
+    extracted_entities = extract_query_entities(query_text)
+    
+    cell_md = ""
+    if extracted_entities:
+        cell_md = table_store.GLOBAL_CELL_INDEX.search_markdown_entities(extracted_entities)
+    
+    # Fallback to general cell index search if entity extraction returned no direct hits
+    if not cell_md:
+        cell_md = table_store.GLOBAL_CELL_INDEX.search_markdown(query_text)
+
     if cell_md:
         latency = (datetime.now() - t0).total_seconds() * 1000
         logger.info(
-            f"[USIE Telemetry] Route: EXACT_IDENTIFIER | Latency: {latency:.1f}ms | "
-            f"Query: '{query_text}' | Hit: Inverted Cell Index Markdown"
+            f"[USIE Telemetry] Route: EXACT_IDENTIFIER | Extracted Entities: {extracted_entities} | "
+            f"Latency: {latency:.1f}ms | Query: '{query_text}' | Hit: Inverted Cell Index Markdown"
         )
         sources = [{
             "filename": "cell_index_lookup",
@@ -191,7 +201,7 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
         }]
         return {
             "route": "CELL_INDEX",
-            "sql_query": "EXACT_CELL_INDEX_LOOKUP",
+            "sql_query": f"EXACT_ENTITY_LOOKUP: {extracted_entities or query_text}",
             "results_markdown": cell_md,
             "sources": sources
         }

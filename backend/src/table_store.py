@@ -554,4 +554,65 @@ class InvertedCellIndex:
 
         return "\n\n".join(markdown_blocks)
 
+    def search_markdown_entities(self, entities: List[str], max_hits: int = 10) -> str:
+        """
+        USIE v4 Entity Search:
+        Searches extracted entities against the inverted cell index with a strict confidence guard.
+        If hits > max_hits (e.g. 10 rows), defers to SQL Router to avoid polluting LLM context.
+        """
+        if not entities:
+            return ""
+
+        row_data_map: Dict[Tuple[str, int], Dict[str, str]] = {}
+        for entity in entities:
+            e_clean = entity.strip().lower()
+            if not e_clean:
+                continue
+            raw_tokens = set(re.split(r'[^\w]+', e_clean))
+            raw_tokens.add(e_clean)
+
+            for t in raw_tokens:
+                if t in self._index:
+                    for db_table_name, col_name, row_idx, cell_val in self._index[t]:
+                        row_key = (db_table_name, row_idx)
+                        row_dict = self._rows.get(row_key)
+                        if row_dict:
+                            # Only include if extracted entity string is actually in the row values
+                            row_vals_concat = " ".join(row_dict.values()).lower()
+                            if e_clean in row_vals_concat or any(sub in row_vals_concat for sub in raw_tokens if len(sub) >= 3):
+                                row_data_map[row_key] = row_dict
+
+        # Guard: If entity search matched > max_hits rows, treat as a broad filter and defer to SQL Router
+        if len(row_data_map) > max_hits:
+            logger.info(f"[USIE Cell Index] Entity search matched {len(row_data_map)} rows (> {max_hits} max). Deferring to SQL Router.")
+            return ""
+
+        if not row_data_map:
+            return ""
+
+        # Group matched rows by table name
+        table_rows: Dict[str, List[Tuple[int, Dict[str, str]]]] = {}
+        for (db_table_name, row_idx), row_dict in row_data_map.items():
+            if db_table_name not in table_rows:
+                table_rows[db_table_name] = []
+            table_rows[db_table_name].append((row_idx, row_dict))
+
+        markdown_blocks = []
+        for db_table_name, rows_list in table_rows.items():
+            cols = self._table_columns.get(db_table_name, list(rows_list[0][1].keys()))
+            hdr_line = "| " + " | ".join(cols) + " |"
+            sep_line = "| " + " | ".join(["---"] * len(cols)) + " |"
+            data_lines = []
+            for r_idx, r_dict in rows_list:
+                vals = [r_dict.get(c, "").replace("\n", " ") for c in cols]
+                data_lines.append("| " + " | ".join(vals) + " |")
+
+            block = (
+                f"### Exact Entity Cell Match (Table: `{db_table_name}`, Matched {len(rows_list)} Row(s)):\n"
+                f"{hdr_line}\n{sep_line}\n" + "\n".join(data_lines)
+            )
+            markdown_blocks.append(block)
+
+        return "\n\n".join(markdown_blocks)
+
 GLOBAL_CELL_INDEX = InvertedCellIndex()

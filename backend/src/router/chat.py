@@ -2,7 +2,7 @@ import os
 import re
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 from pydantic import BaseModel
 from fastapi import APIRouter, Header
@@ -171,40 +171,72 @@ def voyage_rerank(query: str, documents: List[str], top_k: int = 5) -> List[str]
         logger.warning(f"Voyage rerank failed: {e}. Returning raw top documents.")
         return documents[:top_k]
 
+def _match_sources(sql: str, schema_map: dict, company_id: str, results_md: str) -> list:
+    """Map the tables referenced in a SQL string back to their source files (for UI citations)."""
+    matched_files = []
+    sql_lower = (sql or "").lower()
+    docs_dir = config.company_documents_dir(company_id)
+    listing = os.listdir(docs_dir) if os.path.isdir(docs_dir) else []
+    for t_name, info in (schema_map or {}).items():
+        if t_name.lower() in sql_lower:
+            source_key = (info.get("source_key") or t_name).lower()
+            for f in listing:
+                if sanitize_name(f) in source_key:
+                    matched_files.append(f)
+                    break
+    sources = []
+    for f in set(matched_files):
+        sources.append({
+            "filename": f,
+            "relative_path": f"./backend/knowledge_base/{f}",
+            "exact_snippet_text": f"SQL Query: {sql}\n\nResults:\n{results_md}",
+            "score": 1.0,
+        })
+    return sources
+
+
+def _execute_and_format(sql: str, schema_map: dict, company_id: str, route: str = "SQL") -> Optional[dict]:
+    """Run a SELECT against the tenant's Tier-C tables, format the rows as markdown,
+    attach source citations. Returns None on error or empty/all-null result so the
+    caller can fall back. Shared by the exact-value fast-path and the LLM SQL path."""
+    try:
+        col_names, rows = table_store.execute_select(sql, company_id)
+    except Exception as e:
+        logger.error(f"SQL execution failed ({route}): {e}")
+        return None
+
+    is_empty = True
+    for r in (rows or []):
+        if any(v is not None and str(v).strip() != "" and str(v).lower() != "none" for v in r):
+            is_empty = False
+            break
+    if not rows or is_empty:
+        return None
+
+    results_md = f"SQL Query executed: `{sql}`\n\n"
+    results_md += "| " + " | ".join(col_names) + " |\n"
+    results_md += "| " + " | ".join(["---"] * len(col_names)) + " |\n"
+    for r in rows[:40]:
+        results_md += "| " + " | ".join(str(v) for v in r) + " |\n"
+
+    return {
+        "route": route,
+        "sql_query": sql,
+        "results_markdown": results_md,
+        "sources": _match_sources(sql, schema_map, company_id, results_md),
+    }
+
+
 async def route_and_execute(query_text: str, company_id: str = None) -> Optional[dict]:
     # ── USIE v4 TELEMETRY LOGGING & ENTITY EXTRACTION ──
     t0 = datetime.now()
     
-    # Step A: Query-Time Entity Extraction (Decouples phrasing/synonyms from database lookup)
-    from backend.src.router.entity_extractor import extract_query_entities
-    extracted_entities = extract_query_entities(query_text)
-    
-    cell_md = ""
-    if extracted_entities:
-        cell_md = table_store.GLOBAL_CELL_INDEX.search_markdown_entities(extracted_entities)
-    
-    # Fallback to general cell index search if entity extraction returned no direct hits
-    if not cell_md:
-        cell_md = table_store.GLOBAL_CELL_INDEX.search_markdown(query_text)
-
-    if cell_md:
-        latency = (datetime.now() - t0).total_seconds() * 1000
-        logger.info(
-            f"[USIE Telemetry] Route: EXACT_IDENTIFIER | Extracted Entities: {extracted_entities} | "
-            f"Latency: {latency:.1f}ms | Query: '{query_text}' | Hit: Inverted Cell Index Markdown"
-        )
-        sources = [{
-            "filename": "cell_index_lookup",
-            "relative_path": "./backend/knowledge_base",
-            "exact_snippet_text": cell_md,
-            "score": 1.0
-        }]
-        return {
-            "route": "CELL_INDEX",
-            "sql_query": f"EXACT_ENTITY_LOOKUP: {extracted_entities or query_text}",
-            "results_markdown": cell_md,
-            "sources": sources
-        }
+    # Count/aggregation queries must bypass the exact-value fast-path so the SQL
+    # router can compute exact counts/sums rather than dumping matching rows.
+    is_count_query = bool(re.search(
+        r'\b(how many|count|total number of|sum of|average of|avg of|unique|distinct|list all)\b',
+        query_text.lower(),
+    ))
 
     try:
         schema_map = table_store.get_router_schema(company_id)
@@ -213,6 +245,41 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
         return None
     if not schema_map:
         return None
+
+    # ── Exact-value fast-path (Gap 1+2) ──
+    # If a value in the question matches an indexed cell value (persisted,
+    # per-tenant — survives restarts), we know which table+column holds it. This is
+    # the deterministic fix for bare values / IDs / designations like
+    # "Head-Wholesale Credit-CB" that embeddings route poorly.
+    #   • Specific match (multi-word value, or a short direct lookup) → short-circuit
+    #     straight to SQL, no LLM.
+    #   • Otherwise (a single common word inside a longer NL question) → pass it to
+    #     the LLM as a hint and let it decide, to avoid false-positive routing.
+    id_hint = ""
+    if not is_count_query:
+        hit = table_store.cell_lookup(query_text, company_id)
+        if hit:
+            value = hit["value"]
+            multiword = (" " in value) or ("-" in value)
+            short_lookup = len(query_text.split()) <= 5
+            col = hit["column"].replace('"', '""')
+            tbl = hit["table"].replace('"', '""')
+            if multiword or short_lookup:
+                val = value.replace("'", "''").lower()
+                fast_sql = f'SELECT * FROM "{tbl}" WHERE LOWER("{col}") LIKE \'%{val}%\' LIMIT 40'
+                result = _execute_and_format(fast_sql, schema_map, company_id, route="CELL_INDEX")
+                if result:
+                    latency = (datetime.now() - t0).total_seconds() * 1000
+                    logger.info(
+                        f"[USIE] exact-value fast-path: '{value}' -> "
+                        f"{hit['table']}.{hit['column']} ({latency:.0f}ms)"
+                    )
+                    return result
+            else:
+                id_hint = (
+                    f"\nHint: the value '{value}' appears in table \"{hit['table']}\" "
+                    f"column \"{hit['column']}\" — use it if relevant."
+                )
 
     # Step A: Query Rewriter & Step B: Entity Normalization
     rewritten_query = rewrite_query_intent(query_text)
@@ -334,7 +401,7 @@ RULES:
 
     prompt = f"""Available Database Schema:
 {schema_desc}
-
+{id_hint}
 User Query: {query_text}
 
 JSON Output:"""
@@ -391,59 +458,13 @@ JSON Output:"""
         if data.get("route") == "SQL" and data.get("sql_query"):
             sql = data["sql_query"]
             logger.info(f"Query-Time Router selected SQL path: {sql}")
-            
-            # Execute against this tenant's Tier-C tables (Postgres or SQLite).
-            col_names, rows = table_store.execute_select(sql, company_id)
-            
-            # Format results as a neat markdown table
-            is_empty = True
-            if rows:
-                for r in rows:
-                    if any(v is not None and str(v).strip() != "" and str(v).lower() != "none" for v in r):
-                        is_empty = False
-                        break
-            
-            if not rows or is_empty:
-                logger.info(f"SQL query returned 0 rows or only null values. Falling back to vector search. SQL: {sql}")
-                return None
-                
-            results_md = f"SQL Query executed: `{sql}`\n\n"
-            results_md += "| " + " | ".join(col_names) + " |\n"
-            results_md += "| " + " | ".join(["---"] * len(col_names)) + " |\n"
-            for r in rows[:40]:
-                results_md += "| " + " | ".join(str(v) for v in r) + " |\n"
-                    
-            # Match tables inside the SQL query to their source files for UI citations
-            matched_files = []
-            sql_lower = sql.lower()
-            docs_dir = config.company_documents_dir(company_id)
-            listing = os.listdir(docs_dir) if os.path.isdir(docs_dir) else []
-            for t_name, info in schema_map.items():
-                if t_name.lower() in sql_lower:
-                    source_key = (info.get("source_key") or t_name).lower()
-                    for f in listing:
-                        if sanitize_name(f) in source_key:
-                            matched_files.append(f)
-                            break
-                            
-            sources = []
-            for f in set(matched_files):
-                sources.append({
-                    "filename": f,
-                    "relative_path": f"./backend/knowledge_base/{f}",
-                    "exact_snippet_text": f"SQL Query: {sql}\n\nResults:\n{results_md}",
-                    "score": 1.0
-                })
-                
-            return {
-                "route": "SQL",
-                "sql_query": sql,
-                "results_markdown": results_md,
-                "sources": sources
-            }
+            result = _execute_and_format(sql, schema_map, company_id)
+            if result is None:
+                logger.info(f"SQL returned 0 rows / failed; falling back to vector search. SQL: {sql}")
+            return result
     except Exception as e:
         logger.error(f"SQL Router execution failed: {e}. Falling back to semantic search.")
-        
+
     return None
 
 @router.post("/query")

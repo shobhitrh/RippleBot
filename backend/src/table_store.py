@@ -363,14 +363,14 @@ def _sqlite_execute_select(sql: str, company_id: Optional[str]) -> Tuple[List[st
 # Public backend-agnostic API
 # ══════════════════════════════════════════════════════════════════════════════
 def load_tables(tables: List[Tuple[str, pd.DataFrame, str]], company_id: str = None):
-    # Populate inverted cell index for exact lookups
-    for db_table_name, df, title in tables:
-        GLOBAL_CELL_INDEX.build_index(df, db_table_name)
-
     if use_postgres():
         _pg_load(tables, company_id)
     else:
         _sqlite_load(tables, company_id)
+    # Persist the exact-value cell index (survives restarts, per-tenant). This
+    # replaces the old in-memory GLOBAL_CELL_INDEX, which was empty after every
+    # process restart — so the exact-value fast-path never fired in production.
+    _build_cell_index(tables, company_id)
 
 
 def delete_tables_for_file(filename: str, company_id: str = None):
@@ -378,6 +378,170 @@ def delete_tables_for_file(filename: str, company_id: str = None):
         _pg_delete_for_file(filename, company_id)
     else:
         _sqlite_delete_for_file(filename, company_id)
+    _drop_cell_index_for_file(filename, company_id)
+
+
+# ── Persisted per-tenant exact-value cell index ───────────────────────────────
+CELL_INDEX = "__cell_index__"
+
+
+def _iter_index_values(df: "pd.DataFrame"):
+    """
+    Yield (column_name, value) for short text values worth indexing for exact
+    lookup — IDs, codes, names, cities, categorical/designation values. Skips
+    numeric columns (measures) and long free-text (handled by vector search).
+    """
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        seen = set()
+        for v in df[col].dropna().tolist():
+            s = str(v).strip()
+            if 3 <= len(s) <= 60:
+                key = s.lower()
+                if key not in seen:
+                    seen.add(key)
+                    yield str(col), s
+            if len(seen) >= 5000:
+                break
+
+
+def _build_cell_index(tables: List[Tuple[str, pd.DataFrame, str]], company_id: Optional[str]):
+    try:
+        if use_postgres():
+            schema = _tenant_schema(company_id)
+            conn = _pg_conn()
+            try:
+                from psycopg2.extras import execute_values
+                cur = conn.cursor()
+                cur.execute(f"CREATE SCHEMA IF NOT EXISTS {_qi(schema)};")
+                cur.execute(
+                    f"CREATE TABLE IF NOT EXISTS {_qi(schema)}.{_qi(CELL_INDEX)} "
+                    f"(value_norm TEXT, table_name TEXT, column_name TEXT, val_len INT, source_key TEXT);"
+                )
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS cellidx_value ON {_qi(schema)}.{_qi(CELL_INDEX)} (value_norm);"
+                )
+                for logical, df, _title in tables:
+                    if df is None or df.empty:
+                        continue
+                    phys = _physical_name(logical)
+                    cur.execute(f"DELETE FROM {_qi(schema)}.{_qi(CELL_INDEX)} WHERE table_name = %s;", (phys,))
+                    rows = [(v.lower(), phys, col, len(v), logical) for col, v in _iter_index_values(df)]
+                    if rows:
+                        execute_values(
+                            cur,
+                            f"INSERT INTO {_qi(schema)}.{_qi(CELL_INDEX)} "
+                            f"(value_norm, table_name, column_name, val_len, source_key) VALUES %s",
+                            rows,
+                        )
+                logger.info(f"[pg] cell index built for {len(tables)} table(s), tenant '{company_id}'")
+            finally:
+                conn.close()
+        else:
+            db_path = get_db_path(company_id)
+            conn = sqlite3.connect(db_path)
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    f"CREATE TABLE IF NOT EXISTS {CELL_INDEX} "
+                    f"(value_norm TEXT, table_name TEXT, column_name TEXT, val_len INT, source_key TEXT);"
+                )
+                cur.execute(f"CREATE INDEX IF NOT EXISTS cellidx_value ON {CELL_INDEX}(value_norm);")
+                for logical, df, _title in tables:
+                    if df is None or df.empty:
+                        continue
+                    cur.execute(f"DELETE FROM {CELL_INDEX} WHERE table_name = ?", (logical,))
+                    rows = [(v.lower(), logical, col, len(v), logical) for col, v in _iter_index_values(df)]
+                    if rows:
+                        cur.executemany(
+                            f"INSERT INTO {CELL_INDEX} (value_norm, table_name, column_name, val_len, source_key) "
+                            f"VALUES (?, ?, ?, ?, ?)",
+                            rows,
+                        )
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.error(f"_build_cell_index failed: {e}")
+
+
+def _drop_cell_index_for_file(filename: str, company_id: Optional[str]):
+    prefix = sanitize_name(filename)
+    try:
+        if use_postgres():
+            schema = _tenant_schema(company_id)
+            conn = _pg_conn()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    f"DELETE FROM {_qi(schema)}.{_qi(CELL_INDEX)} WHERE source_key LIKE %s;", (prefix + "%",)
+                )
+            finally:
+                conn.close()
+        else:
+            db_path = get_db_path(company_id)
+            if not os.path.exists(db_path):
+                return
+            conn = sqlite3.connect(db_path)
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    f"CREATE TABLE IF NOT EXISTS {CELL_INDEX} "
+                    f"(value_norm TEXT, table_name TEXT, column_name TEXT, val_len INT, source_key TEXT);"
+                )
+                cur.execute(f"DELETE FROM {CELL_INDEX} WHERE source_key LIKE ?", (prefix + "%",))
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception as e:
+        logger.debug(f"_drop_cell_index_for_file: {e}")
+
+
+def cell_lookup(question: str, company_id: str = None) -> Optional[dict]:
+    """
+    Exact-value routing: find the most specific indexed cell value that appears in
+    the question, and return {table, column, value} for it — so a bare value like
+    'Head-Wholesale Credit-CB' routes straight to the table+column that contains it
+    without depending on the LLM or embeddings. Persisted → works after restarts.
+    """
+    q = (question or "").lower()
+    if len(q) < 3:
+        return None
+    try:
+        if use_postgres():
+            schema = _tenant_schema(company_id)
+            conn = _pg_conn()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    f"SELECT table_name, column_name, value_norm FROM {_qi(schema)}.{_qi(CELL_INDEX)} "
+                    f"WHERE strpos(%s, value_norm) > 0 ORDER BY val_len DESC LIMIT 1;",
+                    (q,),
+                )
+                row = cur.fetchone()
+            finally:
+                conn.close()
+        else:
+            db_path = get_db_path(company_id)
+            if not os.path.exists(db_path):
+                return None
+            conn = sqlite3.connect(db_path)
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    f"SELECT table_name, column_name, value_norm FROM {CELL_INDEX} "
+                    f"WHERE instr(?, value_norm) > 0 ORDER BY val_len DESC LIMIT 1;",
+                    (q,),
+                )
+                row = cur.fetchone()
+            finally:
+                conn.close()
+        if row:
+            return {"table": row[0], "column": row[1], "value": row[2]}
+    except Exception as e:
+        logger.debug(f"cell_lookup failed: {e}")
+    return None
 
 
 def get_router_schema(company_id: str = None) -> Dict[str, dict]:

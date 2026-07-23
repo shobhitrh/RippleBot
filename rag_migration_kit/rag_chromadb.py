@@ -47,7 +47,7 @@ class Config:
     
     # Retrieval settings
     TOP_K = 25
-    RERANK_TOP_K = 3
+    RERANK_TOP_K = 8
     
     # API limits
     MAX_BATCH_SIZE = 100
@@ -711,7 +711,7 @@ class RAGEngine:
         logger.info(f"✅ ChromaDB initialized at {self.persist_directory} (tenant='{self.company_id}')")
         logger.info(f"   Collection '{self.collection_name}' has {self.collection.count()} documents")
     
-    def _embed_with_retry(self, texts: List[str], max_retries: int = 3) -> List[List[float]]:
+    def _embed_with_retry(self, texts: List[str], input_type: str = "document", max_retries: int = 3) -> List[List[float]]:
         """Embed texts with exponential backoff retry."""
         all_embeddings = []
         
@@ -740,7 +740,7 @@ class RAGEngine:
             retry_count = 0
             while retry_count < max_retries:
                 try:
-                    res = self.voyage_client.embed(batch, model=config.EMBED_MODEL)
+                    res = self.voyage_client.embed(batch, model=config.EMBED_MODEL, input_type=input_type)
                     all_embeddings.extend(res.embeddings)
                     break
                 except Exception as e:
@@ -887,7 +887,7 @@ class RAGEngine:
                 for start in range(0, n, slice_size):
                     part = chunks[start:start + slice_size]
                     texts = [c['text'] for c in part]
-                    embeddings = self._embed_with_retry(texts)  # one bounded slice
+                    embeddings = self._embed_with_retry(texts, input_type="document")  # one bounded slice
                     ids = [f"chunk_{uuid.uuid4().hex[:16]}" for _ in part]
                     metadatas = [c['metadata'] for c in part]
                     self.collection.add(
@@ -934,7 +934,7 @@ class RAGEngine:
             }
         
         # Embed query
-        query_embedding = self._embed_with_retry([query_text])[0]
+        query_embedding = self._embed_with_retry([query_text], input_type="query")[0]
         
         # Search ChromaDB
         try:

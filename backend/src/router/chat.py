@@ -297,7 +297,7 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
         except Exception as fast_err:
             logger.warning(f"Fast-Path SQL failed: {fast_err}, falling back to router")
 
-    # Two-Stage Routing: if schema has > 15 tables, ask LLM to shortlist top 3 candidate tables first
+    # Two-Stage Routing: if schema has > 15 tables, ask LLM to shortlist top 8 candidate tables first
     if len(schema_map) > 15:
         table_overview = ""
         for t, info in schema_map.items():
@@ -305,7 +305,7 @@ async def route_and_execute(query_text: str, company_id: str = None) -> Optional
             title_str = f" (Title: \"{title}\")" if title else ""
             table_overview += f"- {t}{title_str}\n"
 
-        shortlist_prompt = f"""You are a database table selector. Given the user's query and a list of available database tables, select up to 3 table names that are most relevant to answering the query.
+        shortlist_prompt = f"""You are a database table selector. Given the user's query and a list of available database tables, select up to 8 table names that are most relevant to answering the query.
 
 Available Tables:
 {table_overview}
@@ -640,7 +640,7 @@ Answer:"""
         )
         
         # Unique identifier for the source chunk
-        cite_key = (filename, meta.get("sheet"), content[:80])
+        cite_key = (filename, meta.get("sheet_name") or meta.get("sheet"), content[:80])
         if cite_key in seen_cite:
             continue
         seen_cite.add(cite_key)
@@ -668,19 +668,21 @@ Answer:"""
         # Remove overlapping line repeats
         deduped_lines = []
         for line in content.split("\n"):
-            line_strip = line.strip()
-            if line_strip and line_strip in seen_lines:
+            clean_l = line.strip()
+            if not clean_l:
                 continue
-            if line_strip:
-                seen_lines.add(line_strip)
+            if clean_l in seen_lines and len(clean_l) > 15:
+                continue
+            seen_lines.add(clean_l)
             deduped_lines.append(line)
-        cleaned_content = "\n".join(deduped_lines).strip()
-        if not cleaned_content:
+
+        clean_content = "\n".join(deduped_lines)
+        if not clean_content.strip():
             continue
 
         if used_chars >= MAX_CONTEXT_CHARS:
             continue
-        snippet = cleaned_content[:MAX_SNIPPET_CHARS]
+        snippet = clean_content[:MAX_SNIPPET_CHARS]
         remaining = MAX_CONTEXT_CHARS - used_chars
         if len(snippet) > remaining:
             snippet = snippet[:remaining] + "\n…[truncated]"
@@ -691,7 +693,7 @@ Answer:"""
             or "Unknown Date"
         )
         context_snippets.append(
-            f"[Source {idx}: {filename} (Date: {source_date})]\n{snippet}"
+            f"[Document {idx}: {filename}]\n{snippet}"
         )
 
     # 4. Build the streaming generator (sources first, then LLM tokens).
@@ -709,6 +711,7 @@ Answer:"""
 CRITICAL INSTRUCTIONS ON SOURCES AND CITATIONS:
 - NEVER include inline source citations, file names, dates, or source links in your response text (e.g. do NOT write things like '[Source: file.xlsx]', 'Source: ...', or reference filenames in parentheses).
 - The user interface automatically displays clickable file badges at the bottom of your response based on the returned sources list.
+- NEVER output raw internal database table names (such as 'ispl_candidate_details_screen_master_values_...' or internal table hashes like '_37a812bf') in your text. Present all facts cleanly using natural language and human-readable names.
 
 CRITICAL INSTRUCTIONS ON COUNTING AND SUMMARIES:
 - When a "Table Summary" or "Sample Rows Preview" snippet is in the context above, note that it shows only 5 sample preview rows. Never state a total count or report an exhaustive list based solely on preview rows. For exact totals and counts, state the Total Rows count given in the table summary or rely on database SQL results.

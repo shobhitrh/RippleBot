@@ -398,7 +398,7 @@ async def get_document_preview(filename: str, company_id: str = CompanyId):
             try:
                 chunks, sqlite_tables = process_excel_file(file_path)
                 parts = []
-                for table_name, df in sqlite_tables[:20]:
+                for table_name, df, _title in sqlite_tables[:20]:
                     name_parts = table_name.split("_")
                     sheet_lbl = name_parts[-2] if len(name_parts) >= 3 else "Sheet"
                     tbl_lbl = name_parts[-1] if len(name_parts) >= 3 else "Table"

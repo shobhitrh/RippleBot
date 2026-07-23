@@ -12,6 +12,14 @@ import openpyxl
 
 logger = logging.getLogger(__name__)
 
+def count_tokens(text: str) -> int:
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return len(text.split())
+
 def get_db_path(company_id: str = None) -> str:
     """
     Per-tenant SQLite database path: <knowledge_base>/db/<company_id>_tables.db.
@@ -291,6 +299,9 @@ def process_csv_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.Dat
         h_clean = sanitize_name(str(h))
         if not h_clean or "unnamed" in h_clean.lower():
             h_clean = f"col_{i}"
+        reserved_kw = {"values", "value", "select", "table", "order", "group", "where", "from", "index", "distinct", "key"}
+        if h_clean.lower() in reserved_kw:
+            h_clean = f"{h_clean}_item"
         if h_clean in seen:
             seen[h_clean] += 1
             cleaned_headers.append(f"{h_clean}_{seen[h_clean]}")
@@ -306,55 +317,25 @@ def process_csv_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.Dat
     chunks = []
     dtypes_dict = {col: str(dtype) for col, dtype in df.dtypes.items()}
     
-    # ── Table Summary Chunk for Vector Search ──
-    preview_df = df.head(5).fillna("")
-    preview_md = preview_df.to_markdown(index=False)
-    summary_text = (
-        f"## Table: {filename} (SQL Table Name: {db_table_name})\n"
-        f"Total Rows: {len(df)}\n"
-        f"Columns ({len(df.columns)}): {', '.join(df.columns)}\n\n"
-        f"### Sample Rows Preview:\n{preview_md}"
-    )
-    chunks.append({
-        "text": summary_text,
-        "metadata": {
-            "source": file_path,
-            "source_name": filename,
-            "source_file": filename,
-            "type": "csv",
-            "sheet_name": "default",
-            "table_id": db_table_name,
-            "row_range": [1, len(df)],
-            "columns": list(df.columns),
-            "column_dtypes": dtypes_dict,
-            "chunk_tier": "table_summary",
-        }
-    })
-
-    # Smart windowing: scale window chunks based on table size.
-    # Large files (>500 rows): summary only — SQL handles all lookups.
-    # Medium files (51-500 rows): summary + up to 5 sampled windows for context.
-    # Small files (<=50 rows): summary + all row windows (at most ceil(50/15)=4 extra chunks).
+    # ── Per-Table Complete Markdown Chunking for CSV ──
     nrows = len(df)
-    if nrows <= 50:
-        window_size = 15
-        windows_to_emit = list(range(0, nrows, window_size))
-    elif nrows <= 500:
-        window_size = max(nrows // 5, 15)
-        windows_to_emit = list(range(0, nrows, window_size))[:5]
-    else:
-        windows_to_emit = []  # Summary chunk only — SQL router answers specific queries
+    MAX_CHUNK_TOKENS = 750
+    header_text = (
+        f"## File: {filename} (Table: {db_table_name})\n"
+        f"Total Rows: {nrows} | Columns ({len(df.columns)}): {', '.join(df.columns)}\n\n"
+    )
 
-    for i in windows_to_emit:
-        window_df = df.iloc[i:i+window_size].fillna("")
-        window_df = window_df.copy()
-        for col in window_df.columns:
-            if window_df[col].dtype == object:
-                window_df[col] = window_df[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', '', regex=False)
-        md_table = window_df.to_markdown(index=False)
-        chunk_text = f"## File: {filename} (Rows {i+1}-{min(i+window_size, nrows)})\n\n{md_table}"
+    df_clean = df.copy().fillna("")
+    for col in df_clean.columns:
+        if df_clean[col].dtype == object:
+            df_clean[col] = df_clean[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', '', regex=False)
+
+    full_md = df_clean.to_markdown(index=False)
+    total_tokens = count_tokens(header_text + full_md)
+
+    if nrows <= 50 or total_tokens <= MAX_CHUNK_TOKENS:
         chunks.append({
-            "text": chunk_text,
+            "text": header_text + full_md,
             "metadata": {
                 "source": file_path,
                 "source_name": filename,
@@ -362,23 +343,83 @@ def process_csv_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.Dat
                 "type": "csv",
                 "sheet_name": "default",
                 "table_id": db_table_name,
-                "row_range": [i + 1, min(i + window_size, nrows)],
+                "row_range": [1, nrows],
                 "columns": list(df.columns),
                 "column_dtypes": dtypes_dict,
-                "chunk_tier": "markdown_window"
+                "chunk_tier": "table_full",
             }
         })
-
-    # Per-file safety cap (same policy as Excel — see process_excel_file).
-    MAX_CHUNKS_PER_FILE = 100
-    if len(chunks) > MAX_CHUNKS_PER_FILE:
-        logger.warning(
-            f"⚠️  CSV {filename}: chunk count {len(chunks)} exceeds cap {MAX_CHUNKS_PER_FILE}. "
-            f"Keeping first {MAX_CHUNKS_PER_FILE}."
+    elif nrows <= 500:
+        start_idx = 0
+        while start_idx < nrows:
+            end_idx = start_idx + 1
+            while end_idx < nrows:
+                slice_md = df_clean.iloc[start_idx:end_idx+1].to_markdown(index=False)
+                if count_tokens(header_text + slice_md) > 650:
+                    break
+                end_idx += 1
+            
+            slice_df = df_clean.iloc[start_idx:end_idx]
+            slice_md = slice_df.to_markdown(index=False)
+            slice_header = f"## File: {filename} (Table: {db_table_name}, Rows {start_idx+1}-{end_idx} of {nrows})\n\n"
+            chunks.append({
+                "text": slice_header + slice_md,
+                "metadata": {
+                    "source": file_path,
+                    "source_name": filename,
+                    "source_file": filename,
+                    "type": "csv",
+                    "sheet_name": "default",
+                    "table_id": db_table_name,
+                    "row_range": [start_idx + 1, end_idx],
+                    "columns": list(df.columns),
+                    "column_dtypes": dtypes_dict,
+                    "chunk_tier": "table_part",
+                }
+            })
+            start_idx = end_idx
+    else:
+        # Large CSV (>500 rows): Summary chunk + 5 sampled windows (SQL handles exact queries)
+        preview_md = df_clean.head(5).to_markdown(index=False)
+        summary_text = (
+            f"## File: {filename} (Table: {db_table_name})\n"
+            f"Total Rows: {nrows} | Columns ({len(df.columns)}): {', '.join(df.columns)}\n\n"
+            f"### Sample Rows Preview:\n{preview_md}"
         )
-        summaries = [c for c in chunks if c["metadata"].get("chunk_tier") == "table_summary"]
-        windows   = [c for c in chunks if c["metadata"].get("chunk_tier") != "table_summary"]
-        chunks = (summaries + windows)[:MAX_CHUNKS_PER_FILE]
+        chunks.append({
+            "text": summary_text,
+            "metadata": {
+                "source": file_path,
+                "source_name": filename,
+                "source_file": filename,
+                "type": "csv",
+                "sheet_name": "default",
+                "table_id": db_table_name,
+                "row_range": [1, nrows],
+                "columns": list(df.columns),
+                "column_dtypes": dtypes_dict,
+                "chunk_tier": "table_summary",
+            }
+        })
+        step = max(nrows // 5, 20)
+        for i in range(0, nrows, step)[:5]:
+            win_df = df_clean.iloc[i:i+20]
+            win_md = win_df.to_markdown(index=False)
+            chunks.append({
+                "text": f"## File: {filename} (Sample Rows {i+1}-{min(i+20, nrows)})\n\n{win_md}",
+                "metadata": {
+                    "source": file_path,
+                    "source_name": filename,
+                    "source_file": filename,
+                    "type": "csv",
+                    "sheet_name": "default",
+                    "table_id": db_table_name,
+                    "row_range": [i + 1, min(i + 20, nrows)],
+                    "columns": list(df.columns),
+                    "column_dtypes": dtypes_dict,
+                    "chunk_tier": "markdown_window",
+                }
+            })
 
     logger.info(f"CSV {filename}: {nrows} rows → {len(chunks)} vector chunk(s) (SQL table also stored).")
     return chunks, [(db_table_name, df, "")]
@@ -722,10 +763,13 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
                 
             final_columns = []
             seen = {}
+            reserved_kw = {"values", "value", "select", "table", "order", "group", "where", "from", "index", "distinct", "key"}
             for h in header:
                 h_clean = sanitize_name(h)
                 if not h_clean:
                     h_clean = "column"
+                if h_clean.lower() in reserved_kw:
+                    h_clean = f"{h_clean}_item"
                 if h_clean in seen:
                     seen[h_clean] += 1
                     final_columns.append(f"{h_clean}_{seen[h_clean]}")
@@ -843,89 +887,93 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
     for t in all_sheet_tables:
         sqlite_tables.append((t["db_table_name"], t["df"], t["table_title"]))
 
-    # Phase 2: Deterministic Chunk Budget
-    # Build Table Summary Chunks
-    summary_chunks = []
+    # Phase 2: Per-Table Complete Markdown Chunking (Zero Row Loss)
+    MAX_CHUNK_TOKENS = 750
+    MAX_CHUNKS_PER_FILE = 200
+
+    table_chunks = []
     for t in all_sheet_tables:
         df = t["df"]
+        if df.empty:
+            continue
         db_table_name = t["db_table_name"]
         final_columns = t["final_columns"]
         table_title = t["table_title"]
         sheet_name = t["sheet_name"]
-        
-        preview_df = df.head(5).fillna("")
-        preview_md = preview_df.to_markdown(index=False)
-        title_str = f" (Title: {table_title})" if table_title else ""
-        summary_text = (
-            f"## File: {filename} | Sheet: {sheet_name}{title_str} (SQL Table: {db_table_name})\n"
-            f"Total Rows: {len(df)}\n"
-            f"Columns ({len(final_columns)}): {', '.join(final_columns)}\n\n"
-            f"### Sample Rows Preview:\n{preview_md}"
-        )
-        dtypes_dict = {col: str(dtype) for col, dtype in df.dtypes.items()}
-        summary_chunks.append({
-            "text": summary_text,
-            "metadata": {
-                "source": file_path,
-                "source_name": filename,
-                "source_file": filename,
-                "type": "excel",
-                "sheet_name": sheet_name,
-                "table_id": db_table_name,
-                "row_range": [t["min_r"] + 1, t["max_r"] + 1],
-                "columns": final_columns,
-                "column_dtypes": dtypes_dict,
-                "chunk_tier": "table_summary",
-            }
-        })
-
-    chunks.extend(summary_chunks)
-    chunks.extend(leftover_chunks)
-
-    # Proportional window chunking
-    total_summary_count = len(summary_chunks) + len(leftover_chunks)
-    window_budget = max(0, 100 - total_summary_count)
-
-    total_rows_all_tables = sum(len(t["df"]) for t in all_sheet_tables) or 1
-
-    for t in all_sheet_tables:
-        df = t["df"]
         nrows = len(df)
-        if nrows <= 0 or window_budget <= 0:
-            continue
-            
-        # Proportion of budget assigned to this table
-        prop_windows = int((nrows / total_rows_all_tables) * window_budget)
-        target_windows = min(max(prop_windows, 1 if nrows <= 50 else 0), 5)
+        dtypes_dict = {col: str(dtype) for col, dtype in df.dtypes.items()}
+        title_str = f" (Title: {table_title})" if table_title else ""
+        header_text = (
+            f"## File: {filename} | Sheet: {sheet_name}{title_str} (Table: {db_table_name})\n"
+            f"Total Rows: {nrows} | Columns ({len(final_columns)}): {', '.join(final_columns)}\n\n"
+        )
+        
+        # Clean dataframe text to prevent newlines breaking Markdown grid rows
+        df_clean = df.copy().fillna("")
+        for col in df_clean.columns:
+            if df_clean[col].dtype == object:
+                df_clean[col] = df_clean[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', '', regex=False)
 
-        if target_windows > 0:
-            step = max(nrows // target_windows, 15)
-            window_indices = list(range(0, nrows, step))[:target_windows]
-            for i in window_indices:
-                window_df = df.iloc[i:i+15].fillna("")
-                window_df = window_df.copy()
-                for col in window_df.columns:
-                    if window_df[col].dtype == object:
-                        window_df[col] = window_df[col].astype(str).str.replace('\n', ' ', regex=False).str.replace('\r', '', regex=False)
-                md_table = window_df.to_markdown(index=False)
-                title_hdr = f" (Title: {t['table_title']})" if t['table_title'] else ""
-                chunk_text = f"## Sheet: {t['sheet_name']}{title_hdr} (Table: {t['table_id']}, Rows {t['min_r'] + i + 1}-{t['min_r'] + min(i+15, nrows) + 1})\n\n{md_table}"
-                dtypes_dict = {col: str(dtype) for col, dtype in df.dtypes.items()}
-                chunks.append({
-                    "text": chunk_text,
+        full_md = df_clean.to_markdown(index=False)
+        total_tokens = count_tokens(header_text + full_md)
+
+        if total_tokens <= MAX_CHUNK_TOKENS:
+            # Emit as 1 complete table chunk
+            table_chunks.append({
+                "text": header_text + full_md,
+                "metadata": {
+                    "source": file_path,
+                    "source_name": filename,
+                    "source_file": filename,
+                    "type": "excel",
+                    "sheet_name": sheet_name,
+                    "table_id": db_table_name,
+                    "table_title": table_title,
+                    "row_range": [t["min_r"] + 1, t["max_r"] + 1],
+                    "columns": final_columns,
+                    "column_dtypes": dtypes_dict,
+                    "chunk_tier": "table_full",
+                }
+            })
+        else:
+            # Row-split into ~600 token chunks, preserving headers on every slice
+            start_idx = 0
+            while start_idx < nrows:
+                end_idx = start_idx + 1
+                while end_idx < nrows:
+                    slice_md = df_clean.iloc[start_idx:end_idx+1].to_markdown(index=False)
+                    if count_tokens(header_text + slice_md) > 650:
+                        break
+                    end_idx += 1
+                
+                slice_df = df_clean.iloc[start_idx:end_idx]
+                slice_md = slice_df.to_markdown(index=False)
+                row_start = t["min_r"] + start_idx + 1
+                row_end = t["min_r"] + end_idx
+                slice_header = (
+                    f"## File: {filename} | Sheet: {sheet_name}{title_str} (Table: {db_table_name}, Rows {row_start}-{row_end} of {nrows})\n"
+                    f"Columns ({len(final_columns)}): {', '.join(final_columns)}\n\n"
+                )
+                table_chunks.append({
+                    "text": slice_header + slice_md,
                     "metadata": {
                         "source": file_path,
                         "source_name": filename,
                         "source_file": filename,
                         "type": "excel",
-                        "sheet_name": t['sheet_name'],
-                        "table_id": t['db_table_name'],
-                        "row_range": [t['min_r'] + i + 1, t['min_r'] + min(i+15, nrows) + 1],
-                        "columns": t['final_columns'],
+                        "sheet_name": sheet_name,
+                        "table_id": db_table_name,
+                        "table_title": table_title,
+                        "row_range": [row_start, row_end],
+                        "columns": final_columns,
                         "column_dtypes": dtypes_dict,
-                        "chunk_tier": "markdown_window"
+                        "chunk_tier": "table_part",
                     }
                 })
+                start_idx = end_idx
+
+    chunks.extend(leftover_chunks)
+    chunks.extend(table_chunks[:MAX_CHUNKS_PER_FILE])
 
     logger.info(f"Excel {filename}: {len(sqlite_tables)} merged table(s) → {len(chunks)} vector chunk(s) (all tables stored in SQL).")
     return chunks, sqlite_tables

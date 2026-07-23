@@ -537,8 +537,8 @@ def classify_region_component(df: pd.DataFrame, min_r: int, max_r: int, min_c: i
     if is_key_value_block(df):
         return RegionType.KEY_VALUE, 0.95, "2-column key-value layout"
         
-    # 2. Regular Data Table (2+ rows, 2+ cols with decent density)
-    if nrows >= 2 and ncols >= 2:
+    # 2. Regular Data Table (2+ rows, 1+ cols with decent density)
+    if nrows >= 2 and ncols >= 1:
         non_empty_ratio = (df.notna().sum().sum()) / (nrows * ncols)
         if non_empty_ratio >= 0.3:
             return RegionType.DATA_TABLE, 0.95, "Structured tabular grid with data"
@@ -550,7 +550,7 @@ def classify_region_component(df: pd.DataFrame, min_r: int, max_r: int, min_c: i
     # 4. Unknown Region fallback
     return RegionType.UNKNOWN, 0.50, "Unstructured grid block preserved as raw region"
 
-PARSER_VERSION = "v4"
+PARSER_VERSION = "v6"
 
 def is_same_column_signature(cols_a: List[str], cols_b: List[str]) -> bool:
     """Check if two column sets have >= 90% overlap or matching column count."""
@@ -603,7 +603,7 @@ def process_excel_file(file_path: str) -> Tuple[List[Dict], List[Tuple[str, pd.D
         
         max_row = sheet_val.max_row
         max_column = sheet_val.max_column
-        if max_row <= 1 or max_column <= 1:
+        if max_row <= 1 or max_column < 1:
             continue
             
         # 1. Resolve and copy grid values, copying top-left cell values into merged cells

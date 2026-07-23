@@ -477,3 +477,25 @@ async def download_document(filename: str, company_id: str = CompanyId):
         filename=safe_filename,
         media_type="application/octet-stream"
     )
+
+
+@router.post("/reindex")
+async def reindex_documents(background_tasks: BackgroundTasks, company_id: str = CompanyId):
+    """
+    Trigger a full re-indexing of all existing documents for the specified company.
+    Re-runs table ingestion, FTS index creation, and vector store chunk embedding.
+    """
+    company_id = config.normalize_company_id(company_id)
+    engine = get_engine(company_id)
+    
+    def _run_reindex():
+        logger.info(f"Starting background re-indexing for company: {company_id}")
+        engine._index_existing_documents()
+        logger.info(f"Re-indexing completed for company: {company_id}")
+
+    background_tasks.add_task(_run_reindex)
+    return {
+        "status": "reindexing_started",
+        "company_id": company_id,
+        "message": "Re-indexing process has been launched in the background."
+    }

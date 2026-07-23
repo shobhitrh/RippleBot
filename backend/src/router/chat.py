@@ -135,7 +135,67 @@ def verify_retrieval_results(sql_result: Optional[dict], query_text: str, compan
             
     return sql_result
 
+def voyage_rerank(query: str, documents: List[str], top_k: int = 5) -> List[str]:
+    """Rerank candidate document chunks using Voyage AI rerank-2 API."""
+    api_key = config.VOYAGE_API_KEY
+    if not api_key or not documents:
+        return documents[:top_k]
+    try:
+        import urllib.request
+        import json
+        url = "https://api.voyageai.com/v1/rerank"
+        payload = json.dumps({
+            "model": "rerank-2",
+            "query": query,
+            "documents": documents,
+            "top_k": min(top_k, len(documents))
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            results = data.get("data", [])
+            reranked_docs = []
+            for item in results:
+                idx = item.get("index")
+                if idx is not None and idx < len(documents):
+                    reranked_docs.append(documents[idx])
+            return reranked_docs or documents[:top_k]
+    except Exception as e:
+        logger.warning(f"Voyage rerank failed: {e}. Returning raw top documents.")
+        return documents[:top_k]
+
 async def route_and_execute(query_text: str, company_id: str = None) -> Optional[dict]:
+    # ── USIE v3 TELEMETRY LOGGING ──
+    t0 = datetime.now()
+    
+    # 0. Step A: Fast Inverted Cell Index Match (Sub-10ms Exact Identifier / Code Lookup)
+    cell_md = table_store.GLOBAL_CELL_INDEX.search_markdown(query_text)
+    if cell_md:
+        latency = (datetime.now() - t0).total_seconds() * 1000
+        logger.info(
+            f"[USIE Telemetry] Route: EXACT_IDENTIFIER | Latency: {latency:.1f}ms | "
+            f"Query: '{query_text}' | Hit: Inverted Cell Index Markdown"
+        )
+        sources = [{
+            "filename": "cell_index_lookup",
+            "relative_path": "./backend/knowledge_base",
+            "exact_snippet_text": cell_md,
+            "score": 1.0
+        }]
+        return {
+            "route": "CELL_INDEX",
+            "sql_query": "EXACT_CELL_INDEX_LOOKUP",
+            "results_markdown": cell_md,
+            "sources": sources
+        }
+
     try:
         schema_map = table_store.get_router_schema(company_id)
     except Exception as e:

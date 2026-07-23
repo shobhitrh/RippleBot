@@ -405,34 +405,100 @@ class AnalyticalEngine:
 class InvertedCellIndex:
     """
     Inverted Index for exact cell values (IDs, codes, emails, names).
-    Maps tokens -> List of (db_table_name, col_name, row_idx, cell_value).
+    Maps tokens -> List of (db_table_name, col_name, row_idx, cell_value)
+    and stores full row dicts to format complete Markdown table hits.
     """
     def __init__(self):
         self._index: Dict[str, List[Tuple[str, str, int, str]]] = {}
+        self._rows: Dict[Tuple[str, int], Dict[str, str]] = {}
+        self._table_columns: Dict[str, List[str]] = {}
 
     def build_index(self, df: pd.DataFrame, db_table_name: str):
+        columns = [str(c) for c in df.columns]
+        self._table_columns[db_table_name] = columns
+
         for row_idx, row in df.iterrows():
+            row_dict = {}
             for col_name, val in row.items():
-                if pd.isna(val):
-                    continue
-                val_str = str(val).strip()
+                val_str = "" if pd.isna(val) else str(val).strip()
+                row_dict[str(col_name)] = val_str
                 if not val_str or len(val_str) < 2:
                     continue
                 
-                tokens = re.split(r'[\s,._\-/]+', val_str.lower())
+                # Index exact value and tokens
+                raw_tokens = set(re.split(r'[^\w]+', val_str.lower()))
+                tokens = {t for t in raw_tokens if t}
+                tokens.add(val_str.lower())
+                
                 for t in tokens:
                     if len(t) >= 2:
                         if t not in self._index:
                             self._index[t] = []
                         if len(self._index[t]) < 100:
                             self._index[t].append((db_table_name, str(col_name), int(row_idx), val_str))
+            
+            self._rows[(db_table_name, int(row_idx))] = row_dict
 
     def search(self, query: str) -> List[Tuple[str, str, int, str]]:
-        query_tokens = re.split(r'[\s,._\-/]+', query.lower())
+        raw_tokens = set(re.split(r'[^\w]+', query.lower()))
+        query_tokens = {t for t in raw_tokens if t}
+        query_tokens.add(query.strip().lower())
         results = []
+        seen = set()
         for t in query_tokens:
             if t in self._index:
-                results.extend(self._index[t])
+                for item in self._index[t]:
+                    if item not in seen:
+                        seen.add(item)
+                        results.append(item)
         return results
+
+    def search_markdown(self, query: str, limit: int = 5) -> str:
+        """
+        Search exact tokens and return formatted Markdown snippets of matching full rows.
+        Injects metadata headers: Table Name, Row Index, Columns.
+        """
+        raw_hits = self.search(query)
+        if not raw_hits:
+            return ""
+
+        # Group hits by (db_table_name, row_idx)
+        table_rows: Dict[str, List[Tuple[int, Dict[str, str]]]] = {}
+        for db_table_name, col_name, row_idx, cell_val in raw_hits:
+            row_key = (db_table_name, row_idx)
+            row_dict = self._rows.get(row_key)
+            if not row_dict:
+                continue
+            if db_table_name not in table_rows:
+                table_rows[db_table_name] = []
+            if not any(r[0] == row_idx for r in table_rows[db_table_name]):
+                table_rows[db_table_name].append((row_idx, row_dict))
+
+        if not table_rows:
+            return ""
+
+        markdown_blocks = []
+        count = 0
+        for db_table_name, rows_list in table_rows.items():
+            if count >= limit:
+                break
+            cols = self._table_columns.get(db_table_name, list(rows_list[0][1].keys()))
+            
+            # Format as Markdown table
+            hdr_line = "| " + " | ".join(cols) + " |"
+            sep_line = "| " + " | ".join(["---"] * len(cols)) + " |"
+            data_lines = []
+            for r_idx, r_dict in rows_list[:5]:
+                vals = [r_dict.get(c, "").replace("\n", " ") for c in cols]
+                data_lines.append("| " + " | ".join(vals) + " |")
+                count += 1
+
+            block = (
+                f"### Exact Cell Index Hit (Table: `{db_table_name}`, Matched {len(rows_list)} Row(s)):\n"
+                f"{hdr_line}\n{sep_line}\n" + "\n".join(data_lines)
+            )
+            markdown_blocks.append(block)
+
+        return "\n\n".join(markdown_blocks)
 
 GLOBAL_CELL_INDEX = InvertedCellIndex()

@@ -18,7 +18,8 @@ class SmartExcelProcessor:
     1. Unmerges & forward-fills cells so header/category ranges never go blank.
     2. Auto-detects the true table header row (ignoring title/banner rows).
     3. Classifies sheets into 'TABULAR' (for SQL/Vector row chunks) vs 'DOCUMENT' (for Markdown/Section RAG chunks).
-    4. Outputs clean Key-Value YAML Record Cards for Voyage-4-Large & Rerank-2.5.
+    4. For DOCUMENT sheets, converts to Markdown and chunks using specialized semantic Markdown block chunking.
+    5. For TABULAR sheets, outputs clean Key-Value YAML Record Cards for Voyage-4-Large & Rerank-2.5.
     """
     
     def __init__(self, output_dir=None):
@@ -125,78 +126,172 @@ class SmartExcelProcessor:
         else:
             return "DOCUMENT"
 
+    @staticmethod
+    def split_markdown_blocks(md: str) -> list:
+        """Split markdown text into semantic blocks (headers, code blocks, tables, lists)."""
+        blocks = []
+        buf = []
+        in_code = False
+
+        lines = md.splitlines()
+        for line in lines:
+            if line.strip().startswith("```"):
+                in_code = not in_code
+                buf.append(line)
+                continue
+
+            if in_code:
+                buf.append(line)
+                continue
+
+            if re.match(r"^#{1,6}\s+", line):
+                if buf:
+                    blocks.append("\n".join(buf).strip())
+                    buf = []
+                buf.append(line)
+                continue
+
+            if "|" in line and re.match(r"^\s*\|.*\|\s*$", line):
+                buf.append(line)
+                continue
+
+            if re.match(r"^\s*[-*+]\s+", line):
+                buf.append(line)
+                continue
+
+            if line.strip() == "":
+                if buf:
+                    blocks.append("\n".join(buf).strip())
+                    buf = []
+                continue
+
+            buf.append(line)
+
+        if buf:
+            blocks.append("\n".join(buf).strip())
+
+        return [b for b in blocks if b.strip()]
+
+    def chunk_markdown_blocks(self, blocks: list, max_tokens: int = 800, overlap_tokens: int = 120) -> list:
+        """Chunk markdown blocks with token budget control and overlap."""
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+            def count_tok(t): return len(enc.encode(t))
+            def decode_tok(toks): return enc.decode(toks)
+            def encode_tok(t): return enc.encode(t)
+        except Exception:
+            def count_tok(t): return max(1, len(t) // 4)
+            def decode_tok(toks): return "".join(toks)
+            def encode_tok(t): return list(t)
+
+        chunks = []
+        current = []
+        current_tokens = 0
+
+        def flush_with_overlap():
+            nonlocal current, current_tokens
+            if not current:
+                return
+            chunk_text = "\n\n".join(current).strip()
+            chunks.append(chunk_text)
+
+            if overlap_tokens > 0:
+                tokens = encode_tok(chunk_text)
+                overlap = tokens[-overlap_tokens:] if len(tokens) > overlap_tokens else tokens
+                overlap_text = decode_tok(overlap)
+                current = [overlap_text]
+                current_tokens = count_tok(overlap_text)
+            else:
+                current = []
+                current_tokens = 0
+
+        for block in blocks:
+            block_tokens = count_tok(block)
+
+            if block_tokens > max_tokens:
+                if current:
+                    flush_with_overlap()
+
+                tokens = encode_tok(block)
+                start = 0
+                while start < len(tokens):
+                    end = min(start + max_tokens, len(tokens))
+                    chunk = decode_tok(tokens[start:end])
+                    chunks.append(chunk)
+                    start = end - overlap_tokens if overlap_tokens > 0 and end - overlap_tokens > start else end
+                current = []
+                current_tokens = 0
+                continue
+
+            if current_tokens + block_tokens <= max_tokens:
+                current.append(block)
+                current_tokens += block_tokens
+            else:
+                flush_with_overlap()
+                current.append(block)
+                current_tokens += block_tokens
+
+        if current:
+            flush_with_overlap()
+
+        return chunks
+
     def process_document_sheet(self, ws, file_name, sheet_name, min_r, max_r, min_c, max_c, file_path=None):
         """
-        Parses mixed/document sheets dynamically into clean Markdown & RAG Section Chunks.
+        Parses mixed/document sheets into clean Markdown & chunks using specialized Markdown block chunking.
         """
         md_lines = [f"# {file_name} - {sheet_name}\n"]
-        chunks = []
-        
         current_section = "General"
-        current_section_lines = []
-        chunk_idx = 0
-        
+
         for r in range(min_r, max_r + 1):
             if hasattr(ws, 'cell'):
                 row_vals = [ws.cell(r, c).value for c in range(min_c, max_c + 1)]
             else:
                 row_vals = ws[r - 1]
             non_empty = [str(v).strip() for v in row_vals if v is not None and str(v).strip() != '']
-            
+
             if not non_empty:
                 continue
-                
+
             # Detect section headers (single string, short, not ending in period)
             if len(non_empty) == 1:
                 text = non_empty[0]
                 if len(text) < 70 and not text.endswith('.'):
-                    if current_section_lines:
-                        chunk_text = "\n".join(current_section_lines)
-                        chunks.append({
-                            "text": f"[{file_name} > {sheet_name} > {current_section}]\n{chunk_text}",
-                            "metadata": {
-                                "source": file_path or file_name,
-                                "source_name": file_name,
-                                "file_name": file_name,
-                                "sheet": sheet_name,
-                                "sheet_name": sheet_name,
-                                "section": current_section,
-                                "type": "document_section",
-                                "chunk_index": chunk_idx,
-                                "indexed_at": datetime.now().isoformat()
-                            }
-                        })
-                        chunk_idx += 1
-                        current_section_lines = []
                     current_section = text
                     md_lines.append(f"\n## {text}\n")
                 else:
-                    line = f"- {text}"
-                    md_lines.append(line)
-                    current_section_lines.append(line)
+                    md_lines.append(f"- {text}")
             else:
                 line = "| " + " | ".join([t.replace('|', '&#124;').replace('\n', ' ') for t in non_empty]) + " |"
                 md_lines.append(line)
-                current_section_lines.append(line)
-                
-        if current_section_lines:
-            chunk_text = "\n".join(current_section_lines)
+
+        md_content = "\n".join(md_lines) + "\n"
+
+        # Apply specialized Markdown chunker
+        blocks = self.split_markdown_blocks(md_content)
+        chunk_texts = self.chunk_markdown_blocks(blocks, max_tokens=800, overlap_tokens=120)
+
+        chunks = []
+        for i, text in enumerate(chunk_texts):
+            header_match = re.search(r'^#{1,6}\s+(.+)$', text, re.MULTILINE)
+            section = header_match.group(1) if header_match else current_section
+
             chunks.append({
-                "text": f"[{file_name} > {sheet_name} > {current_section}]\n{chunk_text}",
+                "text": f"[{file_name} > {sheet_name}]\n{text}",
                 "metadata": {
                     "source": file_path or file_name,
                     "source_name": file_name,
                     "file_name": file_name,
                     "sheet": sheet_name,
                     "sheet_name": sheet_name,
-                    "section": current_section,
+                    "section": section,
                     "type": "document_section",
-                    "chunk_index": chunk_idx,
+                    "chunk_index": i,
                     "indexed_at": datetime.now().isoformat()
                 }
             })
-            
-        md_content = "\n".join(md_lines) + "\n"
+
         return md_content, chunks
 
     def process_tabular_sheet(self, ws, file_name, sheet_name, header_r, max_r, min_c, max_c, file_path=None):

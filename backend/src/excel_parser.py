@@ -550,7 +550,7 @@ def classify_region_component(df: pd.DataFrame, min_r: int, max_r: int, min_c: i
     # 4. Unknown Region fallback
     return RegionType.UNKNOWN, 0.50, "Unstructured grid block preserved as raw region"
 
-PARSER_VERSION = "v3"
+PARSER_VERSION = "v4"
 
 def is_same_column_signature(cols_a: List[str], cols_b: List[str]) -> bool:
     """Check if two column sets have >= 90% overlap or matching column count."""

@@ -45,6 +45,8 @@ ripplebot_tables.db
 unified_rag_pipeline_output/
 smart_output/
 smart_rag_output/
+scratch/
+*.xlsx
 
 # Node / Frontend
 node_modules/
@@ -80,3 +82,4 @@ scratch_backend.log
 # Runtime tenant registry (persisted via Railway volume, seeded in code)
 backend/knowledge_base/companies.json
 knowledge_base/companies.json
+backend/knowledge_base/*

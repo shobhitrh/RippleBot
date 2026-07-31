@@ -120,15 +120,25 @@ LIVE_DB_HOST = os.getenv("DB_HOST") or None
 LIVE_DB_PORT = int(os.getenv("DB_PORT", "3306"))
 LIVE_DB_USER = os.getenv("DB_USER") or None
 LIVE_DB_PASSWORD = os.getenv("DB_PASSWORD") or None
-LIVE_DB_NAME = os.getenv("DB_NAME") or None
+LIVE_DB_NAME = os.getenv("DB_NAME") or None  # optional default single-schema target
+# Multi-schema fan-out (PRD §15.4): the live server holds many per-tenant schemas,
+# each with its own company_mstr/config_mstr/company_config. Queries fan out across
+# them and return per-schema-labelled results (PIA's _fanout pattern).
+#   * LIVE_DB_SCHEMAS: explicit comma-separated allowlist. If empty, schemas are
+#     auto-discovered (those containing company_mstr) and cached.
+LIVE_DB_SCHEMAS = [s.strip() for s in os.getenv("LIVE_DB_SCHEMAS", "").split(",") if s.strip()]
+LIVE_DB_FANOUT_MAX = int(os.getenv("LIVE_DB_FANOUT_MAX", "30"))  # safety cap on # schemas per fan-out
 # Row cap returned to the model, and the append-only audit log path.
 LIVE_DB_MAX_ROWS = int(os.getenv("DB_MAX_ROWS", "50"))
 DB_AUDIT_LOG = os.getenv("DB_AUDIT_LOG") or str(BACKEND_DIR / "db_audit.log")
 
 
 def live_db_configured() -> bool:
-    """True only when enough creds exist to attempt a live (read-only) MySQL connection."""
-    return bool(LIVE_DB_HOST and LIVE_DB_USER and LIVE_DB_NAME)
+    """
+    True when enough creds exist to attempt a live (read-only) MySQL connection.
+    DB_NAME is NOT required — the fan-out discovers/targets schemas itself.
+    """
+    return bool(LIVE_DB_HOST and LIVE_DB_USER)
 
 
 # -- Document360 help center. Absent => search_help_center tool is a no-op stub.

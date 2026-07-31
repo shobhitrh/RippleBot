@@ -52,12 +52,18 @@ async def agentic_status():
             "query_live_database": {
                 "owner": "pia",
                 "ready": config.live_db_configured(),
-                "missing": [] if config.live_db_configured() else ["DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME"],
+                "mode": "multi-schema fan-out",
+                "missing": [] if config.live_db_configured() else ["DB_HOST", "DB_USER", "DB_PASSWORD"],
             },
             "get_tenant_configs": {
                 "owner": "pia",
                 "ready": config.live_db_configured(),
-                "missing": [] if config.live_db_configured() else ["DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME"],
+                "missing": [] if config.live_db_configured() else ["DB_HOST", "DB_USER", "DB_PASSWORD"],
+            },
+            "list_live_schemas": {
+                "owner": "pia",
+                "ready": config.live_db_configured(),
+                "missing": [] if config.live_db_configured() else ["DB_HOST", "DB_USER", "DB_PASSWORD"],
             },
             "search_help_center": {
                 "owner": "pia",

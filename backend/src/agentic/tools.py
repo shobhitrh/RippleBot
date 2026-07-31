@@ -78,12 +78,17 @@ TOOL_SCHEMAS = [
         "description": (
             "Run a read-only SELECT against the LIVE production database for real-time "
             "operational data that is NEVER uploaded as a file — e.g. current hire counts, "
-            "live config values, application status. Use ONLY for live/current data. "
-            "Read-only and audited."
+            "live config values, application status. The live server holds many per-tenant "
+            "schemas; omit `schema` to fan out across all of them (results are labelled per "
+            "schema), or pass a specific `schema` (see list_live_schemas) to target one. "
+            "Use ONLY for live/current data. Read-only and audited."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"sql": {"type": "string", "description": "A single read-only SELECT statement."}},
+            "properties": {
+                "sql": {"type": "string", "description": "A single read-only SELECT statement."},
+                "schema": {"type": "string", "description": "Optional: target one schema instead of fanning out."},
+            },
             "required": ["sql"],
         },
     },
@@ -92,16 +97,27 @@ TOOL_SCHEMAS = [
         "description": (
             "Resolve a named tenant's effective configuration (overrides + platform "
             "defaults) from the live database in one call. Use for 'what is X set to for "
-            "company Y' questions."
+            "company Y' questions. Fans out across tenant schemas to find the company "
+            "wherever it lives; pass `schema` to target one."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "tenant_name": {"type": "string", "description": "The company/tenant name."},
                 "search_term": {"type": "string", "description": "Optional config keyword filter."},
+                "schema": {"type": "string", "description": "Optional: target one schema instead of fanning out."},
             },
             "required": ["tenant_name"],
         },
+    },
+    {
+        "name": "list_live_schemas",
+        "description": (
+            "List the live database schemas available for querying (each is a per-tenant "
+            "instance with its own config tables). Call this first when you need to target "
+            "a specific tenant's schema."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "search_help_center",
@@ -131,9 +147,13 @@ def execute_tool(name: str, args: dict, company_id: str, sources_out: Optional[l
         if name == "get_document_section":
             return rippletools.get_document_section(args.get("source", ""), company_id, args.get("sheet"))
         if name == "query_live_database":
-            return piatools.query_live_database(args.get("sql", ""), company_id)
+            return piatools.query_live_database(args.get("sql", ""), company_id, args.get("schema"))
         if name == "get_tenant_configs":
-            return piatools.get_tenant_configs(args.get("tenant_name", ""), company_id, args.get("search_term", ""))
+            return piatools.get_tenant_configs(
+                args.get("tenant_name", ""), company_id, args.get("search_term", ""), args.get("schema")
+            )
+        if name == "list_live_schemas":
+            return piatools.list_live_schemas(company_id)
         if name == "search_help_center":
             return piatools.search_help_center(args.get("query", ""), company_id, sources_out)
         return f"Unknown tool: {name}"

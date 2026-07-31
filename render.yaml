@@ -26,3 +26,11 @@ services:
         sync: false
       - key: CORS_ORIGINS
         value: "*"
+      # --- Agentic layer (PIA unification, PRD §18/§19). Optional; off/stub until set.
+      # Secrets use sync:false → enter them in the Render dashboard, never in git.
+      - key: AGENTIC_MODE
+        sync: false            # set to "on" to enable /api/agentic/query
+      - key: ANTHROPIC_API_KEY
+        sync: false            # the Claude orchestration brain
+      - key: DOCUMENT360_API_KEY
+        sync: false            # help-center source; run the D360 ingest after setting

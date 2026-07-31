@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 _MAX_ARTICLE_CHARS = 50_000
 _HTTP_TIMEOUT = 30.0
+# Pacing to stay under Document360's rate limit. A fixed inter-request delay plus
+# bounded exponential backoff that honours the Retry-After header on 429s.
+_REQUEST_DELAY = float(os.getenv("D360_REQUEST_DELAY", "0.35"))  # seconds between calls
+_MAX_RETRIES = int(os.getenv("D360_MAX_RETRIES", "6"))
 
 
 # --------------------------------------------------------------------------- #
@@ -38,6 +42,38 @@ _HTTP_TIMEOUT = 30.0
 # --------------------------------------------------------------------------- #
 def _headers() -> dict:
     return {"api_token": config.DOCUMENT360_API_KEY or "", "Accept": "application/json"}
+
+
+def _get_with_retry(client, url: str):
+    """
+    GET with retry on 429/5xx. Honours Retry-After when present, else exponential
+    backoff (capped). Returns the response (raise_for_status still the caller's job
+    for non-retryable codes) or raises after exhausting retries.
+    """
+    import httpx
+
+    delay = 1.0
+    last_exc = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            r = client.get(url)
+        except httpx.HTTPError as e:  # transient network error — retry
+            last_exc = e
+            time.sleep(delay)
+            delay = min(delay * 2, 30.0)
+            continue
+        if r.status_code == 429 or r.status_code >= 500:
+            retry_after = r.headers.get("Retry-After")
+            wait = float(retry_after) if (retry_after and retry_after.isdigit()) else delay
+            logger.warning("D360 %s on %s — waiting %.1fs (attempt %d/%d)",
+                           r.status_code, url.rsplit("/", 1)[-1], wait, attempt + 1, _MAX_RETRIES)
+            time.sleep(wait)
+            delay = min(delay * 2, 30.0)
+            continue
+        return r
+    if last_exc:
+        raise last_exc
+    return r  # last response (caller inspects status)
 
 
 def _public_url(slug: str) -> str:
@@ -86,7 +122,7 @@ def _resolve_project_version(client) -> str:
     pv = config.DOCUMENT360_PROJECT_VERSION_ID
     if pv:
         return pv
-    r = client.get(f"{config.D360_API_BASE}/v2/projectversions")
+    r = _get_with_retry(client, f"{config.D360_API_BASE}/v2/projectversions")
     r.raise_for_status()
     payload = r.json()
     versions = payload.get("data") if isinstance(payload, dict) else payload
@@ -117,22 +153,30 @@ def ingest() -> dict:
         pv = _resolve_project_version(client)
         logger.info("D360 project version: %s", pv)
 
-        r = client.get(f"{config.D360_API_BASE}/v2/projectversions/{pv}/categories")
+        r = _get_with_retry(client, f"{config.D360_API_BASE}/v2/projectversions/{pv}/categories")
         r.raise_for_status()
         payload = r.json()
         cats = payload.get("data") if isinstance(payload, dict) else (payload or [])
         articles = _walk_categories(cats)
         logger.info("Found %d articles in catalogue.", len(articles))
 
+        force = os.getenv("D360_FORCE", "").strip().lower() in ("1", "true", "yes")
+        skipped = 0
         for art in articles:
             art_id, title, slug, category = art["id"], art["title"], art["slug"], art["category"]
             if not art_id:
                 failed += 1
                 continue
+            out = docs_dir / f"{_safe(category)}__{_safe(title)}_{art_id}.md"
+            # Resume support: if this article was already written on a prior run,
+            # skip the D360 fetch entirely (avoids re-hitting the rate limit).
+            if not force and out.exists() and out.stat().st_size > 200:
+                skipped += 1
+                continue
             try:
-                ar = client.get(f"{config.D360_API_BASE}/v2/articles/{art_id}")
+                ar = _get_with_retry(client, f"{config.D360_API_BASE}/v2/articles/{art_id}")
                 if ar.status_code == 404:
-                    ar = client.get(f"{config.D360_API_BASE}/v1/Articles/{art_id}")
+                    ar = _get_with_retry(client, f"{config.D360_API_BASE}/v1/Articles/{art_id}")
                 ar.raise_for_status()
                 data = ar.json()
             except Exception as e:
@@ -157,7 +201,7 @@ def ingest() -> dict:
                 f.write("\n---\n\n")
                 f.write(text + "\n")
             fetched += 1
-            time.sleep(0.05)  # be polite to the API
+            time.sleep(_REQUEST_DELAY)  # pace requests to stay under the rate limit
 
     # Embed via RippleBot's existing pipeline (Voyage) — incremental by content hash.
     indexed = False

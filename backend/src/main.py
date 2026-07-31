@@ -117,6 +117,16 @@ app.include_router(document.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(company.router, prefix="/api")
 
+# Agentic layer (PIA unification, PRD §18) — additive and opt-in. Wired defensively:
+# any import error here (e.g. a not-yet-installed optional dep) is logged and skipped
+# so it can NEVER break the core RippleBot API. The existing routes above are unaffected.
+try:
+    from backend.src.agentic.router import router as agentic_router
+    app.include_router(agentic_router, prefix="/api")
+    logger.info("Agentic layer mounted at /api/agentic (AGENTIC_MODE=%s).", config.AGENTIC_MODE)
+except Exception:
+    logger.warning("Agentic layer not mounted (optional).", exc_info=True)
+
 @app.get("/")
 async def root():
     """Simple root healthcheck endpoint."""

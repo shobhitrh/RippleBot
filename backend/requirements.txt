@@ -33,3 +33,9 @@ PyMuPDF>=1.23.0
 # Math & Helpers
 numpy>=1.24.0
 rapidfuzz>=3.6.0
+
+# Agentic layer (PIA unification, PRD §18) — optional. The app imports these lazily,
+# so it still runs if they're absent, but install them to activate the Claude loop
+# (anthropic) and the live-MySQL tool (pymysql).
+anthropic>=0.40.0
+pymysql>=1.1.0

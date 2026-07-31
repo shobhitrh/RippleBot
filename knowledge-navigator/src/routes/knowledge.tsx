@@ -52,6 +52,11 @@ function KnowledgePage() {
   const [dept, setDept] = useState("Engineering");
   const [category, setCategory] = useState<KnowledgeFile["category"]>("Policy");
   const [uploading, setUploading] = useState(false);
+  // Custom Participant Visibility (PRD §4). Default "all" = visible to everyone in
+  // the company; "custom" restricts to an explicit email list. Non-breaking: these
+  // are sent as optional form fields the backend stores in metadata.
+  const [visibility, setVisibility] = useState<"all" | "custom">("all");
+  const [allowedParticipants, setAllowedParticipants] = useState("");
 
   const refreshFiles = useCallback(async () => {
     try {
@@ -120,6 +125,18 @@ function KnowledgePage() {
     formData.append("department", dept);
     formData.append("category", category || "Policy");
     formData.append("uploaded_by", "User");
+    // Custom Participant Visibility (PRD §4) — optional; backend stores in metadata.
+    formData.append("visibility_type", visibility);
+    if (visibility === "custom") {
+      formData.append(
+        "allowed_participants",
+        allowedParticipants
+          .split(/[,\n]/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(",")
+      );
+    }
 
     // Scale the timeout to the payload — many/large files need longer than a
     // single small upload. ~4s per MB on top of a 60s floor, capped at 10 min.
@@ -439,6 +456,33 @@ function KnowledgePage() {
                   <SelectItem value="Other">Other</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+
+            {/* Custom Participant Visibility (PRD §4) */}
+            <div className="grid gap-2">
+              <Label>Visibility</Label>
+              <Select value={visibility} onValueChange={(v) => setVisibility(v as "all" | "custom")}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Visible to everyone in the company</SelectItem>
+                  <SelectItem value="custom">Custom — specific people only</SelectItem>
+                </SelectContent>
+              </Select>
+              {visibility === "custom" && (
+                <>
+                  <Input
+                    value={allowedParticipants}
+                    onChange={(e) => setAllowedParticipants(e.target.value)}
+                    placeholder="alice@company.com, finance-lead@company.com"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Only these people can retrieve answers from this document. Others get
+                    “No information found.”
+                  </p>
+                </>
+              )}
             </div>
           </div>
 

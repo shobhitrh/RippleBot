@@ -93,6 +93,65 @@ def company_documents_dir(company_id: str) -> str:
     return path
 
 
+# ---------------- AGENTIC LAYER (PIA UNIFICATION — see PRD §18/§19) ----------------
+# The agentic orchestration brain (Claude tool-use loop) is entirely ADDITIVE and
+# OFF BY DEFAULT. With AGENTIC_MODE unset, RippleBot behaves exactly as before —
+# the existing /api/chat/query pipeline is never touched. Flip AGENTIC_MODE=on
+# (and plug in the keys below) to activate the opt-in /api/agentic/query endpoint.
+#
+# Nothing here raises at import time: every heavy dependency (anthropic, pymysql,
+# httpx) is imported lazily inside the agentic module, so a missing package or a
+# missing key degrades gracefully instead of crashing the app.
+
+AGENTIC_MODE = os.getenv("AGENTIC_MODE", "off").strip().lower() in ("on", "1", "true", "yes")
+
+# -- Claude (the orchestration brain). Absent key => agentic loop reports "not configured".
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY") if _valid_key(os.getenv("ANTHROPIC_API_KEY")) else None
+# Orchestration model for complex/multi-source queries (see PRD §19.1 tiers).
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5").strip()
+# Cheaper model for the simple/complex classifier + light synthesis.
+ANTHROPIC_CLASSIFIER_MODEL = os.getenv("ANTHROPIC_CLASSIFIER_MODEL", "claude-haiku-4-5").strip()
+# Agentic loop bounds (mirrors PIA's server.py).
+MAX_TOOL_TURNS = int(os.getenv("MAX_TOOL_TURNS", "10"))
+MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "8"))
+
+# -- Live operational MySQL (PIA crown jewel). Absent => query_live_database tool is a no-op stub.
+LIVE_DB_HOST = os.getenv("DB_HOST") or None
+LIVE_DB_PORT = int(os.getenv("DB_PORT", "3306"))
+LIVE_DB_USER = os.getenv("DB_USER") or None
+LIVE_DB_PASSWORD = os.getenv("DB_PASSWORD") or None
+LIVE_DB_NAME = os.getenv("DB_NAME") or None
+# Row cap returned to the model, and the append-only audit log path.
+LIVE_DB_MAX_ROWS = int(os.getenv("DB_MAX_ROWS", "50"))
+DB_AUDIT_LOG = os.getenv("DB_AUDIT_LOG") or str(BACKEND_DIR / "db_audit.log")
+
+
+def live_db_configured() -> bool:
+    """True only when enough creds exist to attempt a live (read-only) MySQL connection."""
+    return bool(LIVE_DB_HOST and LIVE_DB_USER and LIVE_DB_NAME)
+
+
+# -- Document360 help center. Absent => search_help_center tool is a no-op stub.
+DOCUMENT360_API_KEY = os.getenv("DOCUMENT360_API_KEY") if _valid_key(os.getenv("DOCUMENT360_API_KEY")) else None
+DOCUMENT360_PUBLIC_BASE_URL = (os.getenv("DOCUMENT360_PUBLIC_BASE_URL") or "").rstrip("/")
+DOCUMENT360_PROJECT_VERSION_ID = os.getenv("DOCUMENT360_PROJECT_VERSION_ID") or None
+D360_API_BASE = os.getenv("DOCUMENT360_API_BASE", "https://apihub.document360.io").rstrip("/")
+# Help-center articles are product-wide, not tenant-specific, so they are ingested
+# ONCE into a single reserved company store and every tenant's search_help_center
+# queries that shared store (avoids embedding the same articles 35× — PRD §17.2).
+HELP_CENTER_COMPANY_ID = normalize_company_id(os.getenv("HELP_CENTER_COMPANY_ID", "help_center"))
+
+# -- Supabase auth (tenant scoping). Absent => agentic endpoint falls back to the
+#    X-Company-Id header exactly like the rest of RippleBot (no enforcement change).
+SUPABASE_URL = os.getenv("SUPABASE_URL") or None
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET") or None
+
+
+def anthropic_configured() -> bool:
+    """True when the Claude orchestration brain can be instantiated."""
+    return bool(ANTHROPIC_API_KEY)
+
+
 # Server Config
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))

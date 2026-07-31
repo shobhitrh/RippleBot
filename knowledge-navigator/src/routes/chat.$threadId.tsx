@@ -66,6 +66,15 @@ function ChatThreadView() {
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT);
   const [mobileThreadsOpen, setMobileThreadsOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
+  // Engine selector: "standard" = existing RAG pipeline; "agentic" = Claude loop
+  // (help center + live data + cross-source). Defaults to standard; the toggle only
+  // appears when the backend reports the agentic engine is on AND configured.
+  const [engine, setEngine] = useState<"standard" | "agentic">(() =>
+    typeof window !== "undefined"
+      ? ((window.localStorage.getItem("ksai:engine") as "standard" | "agentic") || "standard")
+      : "standard"
+  );
+  const [agenticAvailable, setAgenticAvailable] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -98,6 +107,24 @@ function ChatThreadView() {
   useEffect(() => {
     inputRef.current?.focus();
   }, [threadId]);
+
+  // Discover whether the agentic engine is available (AGENTIC_MODE on + Claude key).
+  // Purely additive: if unavailable, the toggle is hidden and chat stays on standard.
+  useEffect(() => {
+    let cancelled = false;
+    import("@/lib/agentic").then(({ getAgenticStatus }) =>
+      getAgenticStatus().then((s) => {
+        if (!cancelled) setAgenticAvailable(!!(s?.agentic_mode && s?.orchestrator?.configured));
+      })
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") window.localStorage.setItem("ksai:engine", engine);
+  }, [engine]);
 
   // ── Sidebar drag logic ───────────────────────────────
   const onDragStart = useCallback((e: React.MouseEvent) => {
@@ -159,11 +186,19 @@ function ChatThreadView() {
     });
 
     try {
-      const response = await fetch(apiUrl("/api/chat/query"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...companyHeaders() },
-        body: JSON.stringify({ query: text.trim(), filters: {} }),
-      });
+      // Route to the agentic engine when the user has selected it AND it's available;
+      // otherwise the existing pipeline. Both speak the same SSE contract.
+      const useAgentic = engine === "agentic" && agenticAvailable;
+      const response = await fetch(
+        apiUrl(useAgentic ? "/api/agentic/query" : "/api/chat/query"),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...companyHeaders() },
+          body: JSON.stringify(
+            useAgentic ? { query: text.trim() } : { query: text.trim(), filters: {} }
+          ),
+        }
+      );
 
       if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
 
@@ -190,9 +225,11 @@ function ChatThreadView() {
           try {
             const data = JSON.parse(cleanLine.slice(6));
             if (data.type === "sources") {
-              citations = data.sources.map((s: any) => ({
-                file: s.filename,
-                snippet: s.exact_snippet_text,
+              // Tolerant of both source shapes: standard pipeline emits
+              // {filename, exact_snippet_text}; agentic emits {file, snippet}.
+              citations = (data.sources ?? []).map((s: any) => ({
+                file: s.filename ?? s.file,
+                snippet: s.exact_snippet_text ?? s.snippet,
               }));
               updateMessage(currentThreadId, assistantMsgId, { citations });
             } else if (data.type === "token") {
@@ -562,9 +599,44 @@ function ChatThreadView() {
                 <Send className="h-4 w-4" />
               </Button>
             </div>
-            <p className="mt-1 text-center text-[10px] sm:text-[11px] text-muted-foreground/60">
-              Click <Mic className="inline h-3 w-3 text-accent" /> for voice input &middot; Enter to send
-            </p>
+            <div className="mt-1.5 flex items-center justify-center gap-2">
+              {agenticAvailable && (
+                <div className="flex items-center gap-0.5 rounded-full border bg-card p-0.5 text-[10px] sm:text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => setEngine("standard")}
+                    className={`rounded-full px-2 py-0.5 transition-colors ${
+                      engine === "standard"
+                        ? "bg-accent text-accent-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    Standard
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEngine("agentic")}
+                    title="Agentic engine: help center, live data, and cross-source answers"
+                    className={`rounded-full px-2 py-0.5 transition-colors ${
+                      engine === "agentic"
+                        ? "bg-accent text-accent-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    Assistant
+                  </button>
+                </div>
+              )}
+              <p className="text-[10px] sm:text-[11px] text-muted-foreground/60">
+                {engine === "agentic" && agenticAvailable ? (
+                  "Agentic engine · help center + live data"
+                ) : (
+                  <>
+                    Click <Mic className="inline h-3 w-3 text-accent" /> for voice &middot; Enter to send
+                  </>
+                )}
+              </p>
+            </div>
           </div>
         </div>
       </main>

@@ -17,6 +17,16 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 CompanyId = Header(default=config.DEFAULT_COMPANY_ID, alias="X-Company-Id")
 
 
+def _parse_participants(raw: Optional[str]) -> list:
+    """
+    Normalize a comma/newline-separated participant list (PRD §4) into a clean
+    list of lowercased emails/ids. Empty input → [] (meaning: no restriction).
+    """
+    if not raw:
+        return []
+    return [p.strip().lower() for p in re.split(r"[,\n]", raw) if p.strip()]
+
+
 def _save_and_tag_file(file: UploadFile, metadata: dict, docs_dir: str) -> str:
     """
     Save one uploaded file into docs_dir and attach metadata (frontmatter for
@@ -95,6 +105,8 @@ async def upload_document(
     department: Optional[str] = Form(None),
     uploaded_by: Optional[str] = Form(None),
     category: Optional[str] = Form(None),
+    visibility_type: Optional[str] = Form(None),
+    allowed_participants: Optional[str] = Form(None),
     company_id: str = CompanyId,
 ):
     """
@@ -108,6 +120,10 @@ async def upload_document(
         "uploaded_by": uploaded_by or "System",
         "category": category or "Document",
         "uploaded_at": datetime.utcnow().isoformat(),
+        # Custom Participant Visibility (PRD §4) — stored now; enforced in the
+        # retrieval filter in a later phase. "all" (default) or "custom".
+        "visibility_type": (visibility_type or "all").strip().lower(),
+        "allowed_participants": _parse_participants(allowed_participants),
     }
     try:
         safe_filename = _save_and_tag_file(file, metadata, docs_dir)
@@ -133,6 +149,8 @@ async def upload_documents(
     department: Optional[str] = Form(None),
     uploaded_by: Optional[str] = Form(None),
     category: Optional[str] = Form(None),
+    visibility_type: Optional[str] = Form(None),
+    allowed_participants: Optional[str] = Form(None),
     company_id: str = CompanyId,
 ):
     """
@@ -147,6 +165,9 @@ async def upload_documents(
         "uploaded_by": uploaded_by or "System",
         "category": category or "Document",
         "uploaded_at": datetime.utcnow().isoformat(),
+        # Custom Participant Visibility (PRD §4) — stored now; enforced later.
+        "visibility_type": (visibility_type or "all").strip().lower(),
+        "allowed_participants": _parse_participants(allowed_participants),
     }
 
     saved: List[str] = []

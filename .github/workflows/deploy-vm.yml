@@ -9,8 +9,11 @@ name: Build & Deploy (VM)
 #   VM_HOST, VM_USER, VM_SSH_KEY – SSH deploy target
 
 on:
-  push:
-    branches: [main]
+  # Manual-only until the VM + GCP secrets are set up (GCP_SA_KEY, VM_HOST, VM_USER,
+  # VM_SSH_KEY). Auto-deploy on push would just fail on every commit until then.
+  # Once the infra is ready, uncomment the push trigger below to deploy on merge.
+  # push:
+  #   branches: [main]
   workflow_dispatch:
 
 env:

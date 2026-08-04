@@ -8,7 +8,7 @@
 # POSTGRES_URI=postgresql://ripplebot:...@postgres:5432/ripplebot in .env.
 services:
   app:
-    image: asia-south1-docker.pkg.dev/standalone-tools-491412/tools/ripplebot:latest   # rewritten to :<sha> by the deploy job
+    image: ghcr.io/shobhitrh/ripplebot:latest   # rewritten to :<sha> by the deploy job
     ports:
       - "8000:8000"                              # VM nginx proxies subdomain → :8000
     env_file:

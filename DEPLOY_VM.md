@@ -28,12 +28,12 @@ Google OAuth 2.0 with a domain gate: only `@ripplehire.com` accounts can sign in
 ## One-time setup
 1. **VM:** RHEL 9 in the VPC, Docker + docker-compose installed, `/opt/ripplebot/` created.
 2. **`.env`:** copy `.env.vm.example` → `/opt/ripplebot/.env`, fill in keys (DevOps-managed).
-3. **GitHub secrets:** `GCP_SA_KEY` (service-account JSON with Artifact Registry write), `VM_HOST`, `VM_USER`, `VM_SSH_KEY` (deploy key). Set `GCP_PROJECT` + image path in `deploy-vm.yml`. The VM pulls via its own GCP service account (no PAT).
+3. **GitHub secrets:** `VM_HOST`, `VM_USER`, `VM_SSH_KEY` (deploy key), `GHCR_PAT` (a GitHub PAT with `read:packages`, so the VM can pull the private image). CI push needs no secret — it uses the built-in `GITHUB_TOKEN`.
 4. **Google OAuth:** create an OAuth client; redirect URI `https://chatbot.ripplehire.com/api/auth/callback`; put id/secret in `.env`.
 5. **DNS/LB:** point `chatbot.ripplehire.com` at the HTTPS LB → VM; add the `deploy/nginx-vm-ripplebot.conf` server block to the VM's shared nginx.
 
 ## Deploying
-- **Automatic:** push to `main` → GitHub Actions builds → pushes to **GCP Artifact Registry** (`asia-south1-docker.pkg.dev/<project>/tools/ripplebot`) → SSHes to the VM → prune, pull, `compose up`, verify image match, poll `/api/health`.
+- **Automatic:** push to `main` → GitHub Actions builds → pushes to **GHCR** (`ghcr.io/shobhitrh/ripplebot`) → SSHes to the VM → prune, pull, `compose up`, verify image match, poll `/api/health`. (No GCP project needed — CI pushes with the built-in `GITHUB_TOKEN`; the VM pulls with `GHCR_PAT`.)
 - **Manual:** Actions tab → *Build & Deploy (VM)* → *Run workflow*.
 
 ## Files
@@ -57,9 +57,9 @@ docker run --rm -v ripplebot-data:/data -v /backup:/backup alpine \
 ```
 
 ## Notes / open items
-- **Registry:** **GCP Artifact Registry** (matches infosec-tool; the VM authenticates
-  via its own GCP service account — no PAT to manage). Set `GCP_PROJECT` and the image
-  path in `deploy-vm.yml` to RippleBot's project.
+- **Registry:** **GHCR** (`ghcr.io/shobhitrh/ripplebot`) — no GCP project required. CI
+  push uses the built-in `GITHUB_TOKEN`; the VM pulls the private image with a
+  `read:packages` PAT stored as the `GHCR_PAT` secret.
 - **Auth:** employee-only via Google OAuth + `ALLOWED_DOMAIN=ripplehire.com`, ported
   from infosec-tool into `backend/src/auth/`. OFF by default (`AUTH_ENABLED`); set it on
   + fill the Google creds in `.env` to enforce. Needs a Google OAuth client (redirect

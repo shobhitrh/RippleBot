@@ -1,49 +1,36 @@
 name: Build & Deploy (VM)
 
-# Builds the RippleBot image, pushes to GCP Artifact Registry, and SSH-deploys to
-# the VM. Mirrors trampolinetech/infosec-tool's deploy.yml (GCP SA auth → AR → SSH
-# deploy with prune → pull → compose up → verify → health-poll).
+# Builds the RippleBot image, pushes to GitHub Container Registry (GHCR), and
+# SSH-deploys to the VM. No GCP project needed: CI push uses the built-in
+# GITHUB_TOKEN; the VM pulls with a GHCR PAT.
 #
-# TODO before first run: set GCP_PROJECT below, and add repo secrets:
-#   GCP_SA_KEY   – service-account JSON with Artifact Registry write + (deploy) read
-#   VM_HOST, VM_USER, VM_SSH_KEY – SSH deploy target
+# Manual-only until the VM + secrets are set up (VM_HOST, VM_USER, VM_SSH_KEY,
+# GHCR_PAT). Once the infra is ready, uncomment the push trigger to deploy on merge.
 
 on:
-  # Manual-only until the VM + GCP secrets are set up (GCP_SA_KEY, VM_HOST, VM_USER,
-  # VM_SSH_KEY). Auto-deploy on push would just fail on every commit until then.
-  # Once the infra is ready, uncomment the push trigger below to deploy on merge.
   # push:
   #   branches: [main]
   workflow_dispatch:
 
 env:
-  REGION: asia-south1
-  GCP_PROJECT: standalone-tools-491412        # ← set to RippleBot's GCP project
-  IMAGE: asia-south1-docker.pkg.dev/standalone-tools-491412/tools/ripplebot
+  IMAGE: ghcr.io/${{ github.repository_owner }}/ripplebot
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
+      packages: write        # push to GHCR via the built-in token
     steps:
       - uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - uses: google-github-actions/setup-gcloud@v2
       - uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Artifact Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGION }}-docker.pkg.dev
-          username: _json_key
-          password: ${{ secrets.GCP_SA_KEY }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -75,7 +62,7 @@ jobs:
       - name: Deploy on VM
         uses: appleboy/ssh-action@v1
         env:
-          DEPLOY_IMAGE: asia-south1-docker.pkg.dev/standalone-tools-491412/tools/ripplebot:${{ github.sha }}
+          DEPLOY_IMAGE: ghcr.io/${{ github.repository_owner }}/ripplebot:${{ github.sha }}
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
@@ -83,8 +70,8 @@ jobs:
           envs: DEPLOY_IMAGE
           script: |
             set -e
-            # VM authenticates to Artifact Registry via its own GCP service account.
-            gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+            # Authenticate the VM to GHCR (PAT with read:packages, stored as a secret).
+            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
 
             # Reclaim disk before pulling a multi-GB image (infosec-tool lesson):
             docker image prune -af || true

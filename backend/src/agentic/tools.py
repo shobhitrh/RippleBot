@@ -50,7 +50,9 @@ TOOL_SCHEMAS = [
         "description": (
             "Run a read-only SELECT against structured tables built from THIS company's "
             "UPLOADED Excel/CSV files (counts, sums, averages, group-by). This is NOT the "
-            "live production database — only data the company uploaded. Read-only."
+            "live production database — only data the company uploaded, and it is backed by "
+            "SQLite, so there is NO information_schema/SHOW TABLES here. To discover live "
+            "schemas or tables, use list_live_schemas or query_live_database instead. Read-only."
         ),
         "input_schema": {
             "type": "object",
@@ -81,7 +83,9 @@ TOOL_SCHEMAS = [
             "live config values, application status. The live server holds many per-tenant "
             "schemas; omit `schema` to fan out across all of them (results are labelled per "
             "schema), or pass a specific `schema` (see list_live_schemas) to target one. "
-            "Use ONLY for live/current data. Read-only and audited."
+            "Use ONLY for live/current data. Supports information_schema for table/column "
+            "discovery (e.g. SELECT table_name FROM information_schema.tables WHERE "
+            "table_schema='axis_buddyto'). Read-only and audited."
         ),
         "input_schema": {
             "type": "object",

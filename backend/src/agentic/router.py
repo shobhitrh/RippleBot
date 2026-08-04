@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from backend.src import config
+from backend.src.auth.deps import require_user
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,11 @@ def _msg_stream(text: str):
 
 
 @router.post("/query")
-async def agentic_query(payload: AgenticQuery, company_id: str = CompanyIdHeader):
+async def agentic_query(
+    payload: AgenticQuery,
+    company_id: str = CompanyIdHeader,
+    user: dict = Depends(require_user),  # enforced only when AUTH_ENABLED; anonymous otherwise
+):
     """
     Opt-in agentic endpoint. Streams SSE in the SAME shape as /api/chat/query so the
     existing chat UI can consume it. Degrades gracefully at every missing dependency.
@@ -136,11 +141,17 @@ async def agentic_query(payload: AgenticQuery, company_id: str = CompanyIdHeader
             media_type="text/event-stream",
         )
 
-    # Import the loop lazily so a missing 'anthropic' package can't break app startup.
+    # Route: pure how-to → cheap help-center RAG fast path; else the full agentic loop.
     try:
+        from backend.src.agentic.classifier import classify_route
+        if classify_route(query) == "help":
+            from backend.src.agentic.help_rag import help_rag_stream
+            return StreamingResponse(
+                help_rag_stream(query, company_id), media_type="text/event-stream"
+            )
         from backend.src.agentic.loop import run_agentic_stream
     except Exception as e:  # pragma: no cover
-        logger.error("agentic loop import failed: %s", e)
+        logger.error("agentic routing import failed: %s", e)
         return StreamingResponse(_msg_stream(f"Agentic engine unavailable: {e}"), media_type="text/event-stream")
 
     return StreamingResponse(

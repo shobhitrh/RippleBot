@@ -127,6 +127,15 @@ try:
 except Exception:
     logger.warning("Agentic layer not mounted (optional).", exc_info=True)
 
+# Employee auth (Google OAuth + domain gate) — additive, enforced only when
+# AUTH_ENABLED. Mounted defensively so a missing optional dep can't break startup.
+try:
+    from backend.src.auth.router import router as auth_router
+    app.include_router(auth_router, prefix="/api")
+    logger.info("Auth mounted at /api/auth (AUTH_ENABLED=%s).", config.AUTH_ENABLED)
+except Exception:
+    logger.warning("Auth layer not mounted (optional).", exc_info=True)
+
 @app.get("/")
 async def root():
     """Simple root healthcheck endpoint."""

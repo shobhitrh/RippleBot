@@ -39,3 +39,5 @@ rapidfuzz>=3.6.0
 # (anthropic) and the live-MySQL tool (pymysql).
 anthropic>=0.40.0
 pymysql>=1.1.0
+# Employee auth (Google OAuth + JWT). Optional — imported lazily.
+pyjwt>=2.8.0

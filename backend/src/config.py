@@ -156,6 +156,26 @@ HELP_CENTER_COMPANY_ID = normalize_company_id(os.getenv("HELP_CENTER_COMPANY_ID"
 SUPABASE_URL = os.getenv("SUPABASE_URL") or None
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET") or None
 
+# ---------------- EMPLOYEE AUTH (Google OAuth + domain gate) ----------------
+# Ported from trampolinetech/infosec-tool: only @ALLOWED_DOMAIN Google accounts can
+# sign in. ADDITIVE and OFF BY DEFAULT — with AUTH_ENABLED unset, the app enforces
+# nothing (current behaviour preserved). Flip AUTH_ENABLED=on to gate protected
+# routes to employees. Stateless: the JWT is the session (no users table needed).
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "off").strip().lower() in ("on", "1", "true", "yes")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID") or None
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET") or None
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/api/auth/callback")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-in-production")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRATION_HOURS = int(os.getenv("JWT_EXPIRATION_HOURS", "24"))
+ALLOWED_DOMAIN = (os.getenv("ALLOWED_DOMAIN", "") or "").strip().lstrip("@")  # "" = no restriction
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8000")
+
+
+def auth_configured() -> bool:
+    """True when Google OAuth creds exist so the login flow can run."""
+    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
+
 
 def anthropic_configured() -> bool:
     """True when the Claude orchestration brain can be instantiated."""

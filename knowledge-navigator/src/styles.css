@@ -245,3 +245,10 @@
 
 /* ── Status dot pulse ─────────────────────────────────── */
 .status-online { animation: pulse-glow 2s ease-in-out infinite; }
+
+/* ── Star rating display ────────────────────────────── */
+.star-rating {
+  color: oklch(0.75 0.18 85);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}

@@ -49,12 +49,21 @@ export type SseHandlers = {
 export async function streamAgenticQuery(
   query: string,
   handlers: SseHandlers,
-  opts: { history?: { role: string; content: string }[]; signal?: AbortSignal } = {}
+  opts: {
+    history?: { role: string; content: string }[];
+    signal?: AbortSignal;
+    companyId?: string; // override tenant scope (the Assistant tab is cross-tenant)
+  } = {}
 ): Promise<void> {
   try {
+    // The Assistant is cross-tenant: help center is a shared store and the live-DB
+    // tool fans out across all schemas, so a fixed scope avoids company-selector bias.
+    const headers: Record<string, string> = opts.companyId
+      ? { "Content-Type": "application/json", "X-Company-Id": opts.companyId }
+      : { "Content-Type": "application/json", ...companyHeaders() };
     const res = await fetch(apiUrl("/api/agentic/query"), {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...companyHeaders() },
+      headers,
       body: JSON.stringify({ query, history: opts.history ?? null }),
       signal: opts.signal,
     });

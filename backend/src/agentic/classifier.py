@@ -23,6 +23,24 @@ _LIVE_SIGNALS = re.compile(
 _HELP_SIGNALS = re.compile(r"\b(how do i|how to|how can i|set up|setup|enable|configure|what does)\b", re.IGNORECASE)
 
 
+def classify_route(query: str) -> str:
+    """
+    Route an Assistant-tab query to the cheapest capable path:
+      'help'    → pure how-to/help question with no live-data signals → help-center RAG
+      'agentic' → everything else (live data, cross-source, config lookups) → tool loop
+    Conservative: only takes the help fast-path when it clearly looks like a how-to
+    AND shows no live-data intent.
+    """
+    q = (query or "").strip()
+    if not q:
+        return "agentic"
+    if _LIVE_SIGNALS.search(q):
+        return "agentic"
+    if _HELP_SIGNALS.search(q):
+        return "help"
+    return "agentic"
+
+
 def classify(query: str) -> str:
     """Return 'simple' or 'complex'. Conservative: only escalate on clear signals."""
     q = (query or "").strip()

@@ -22,6 +22,9 @@ import {
 const items = [
   { title: "Overview", url: "/", icon: LayoutDashboard },
   { title: "Chatbot Assistant", url: "/chat", icon: MessageSquare },
+  // Cross-tenant, internal agentic assistant (help center + live data), not scoped
+  // to the selected company — see PRD §18.
+  { title: "Assistant (PIA)", url: "/assistant", icon: Sparkles },
   { title: "Knowledge Base", url: "/knowledge", icon: FolderTree },
   { title: "Meeting Logs", url: "/meetings", icon: Radio },
   { title: "Company Settings", url: "/settings", icon: Building2 },

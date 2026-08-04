@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 # Cache of auto-discovered config-bearing schemas (TTL, in-process).
 _SCHEMA_CACHE = {"ts": 0.0, "schemas": []}
 _SCHEMA_TTL = 300.0
+# Per-schema tenant-name column: company_mstr uses COMPANY_NAME in the *_buddyto/
+# base schemas but DISPLAY_NAME in the *_cp/portal (candidate-portal) schemas.
+_NAME_COL_CACHE: dict = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -167,35 +170,93 @@ def query_live_database(sql: str, company_id: str, schema: Optional[str] = None)
         return f"Error querying live database: {e}"
 
 
+def _company_name_col(conn, schema: str) -> Optional[str]:
+    """
+    Return the tenant-name column of `schema`.company_mstr — COMPANY_NAME (base
+    schemas) or DISPLAY_NAME (candidate-portal schemas), or None if neither. Cached.
+    """
+    if schema in _NAME_COL_CACHE:
+        return _NAME_COL_CACHE[schema]
+    col = None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema=%s AND table_name='company_mstr' "
+                "AND column_name IN ('COMPANY_NAME','DISPLAY_NAME')",
+                (schema,),
+            )
+            cols = {r[0] for r in cur.fetchall()}
+        col = "COMPANY_NAME" if "COMPANY_NAME" in cols else ("DISPLAY_NAME" if "DISPLAY_NAME" in cols else None)
+    except Exception:
+        col = None
+    _NAME_COL_CACHE[schema] = col
+    return col
+
+
 def get_tenant_configs(
     tenant_name: str, company_id: str, search_term: str = "", schema: Optional[str] = None
 ) -> str:
     """
     Resolve a tenant's effective config (overrides + platform defaults) — PIA's JOIN
     shortcut. Without `schema`, fans out across all tenant-config schemas to find the
-    tenant wherever it lives. Read-only.
+    tenant wherever it lives. Detects the correct tenant-name column per schema
+    (COMPANY_NAME vs DISPLAY_NAME) so it works across the differing schema shapes.
+    Read-only.
     """
     if not config.live_db_configured():
         return (
             "⚙️ Live database is not configured yet — tenant config lookup needs the "
             "live MySQL connection (DB_HOST/DB_USER/DB_PASSWORD in .env)."
         )
+    schemas = [schema] if schema else _config_schemas()
+    if not schemas:
+        return "No tenant schemas discovered to query."
+
     like = f"%{search_term}%" if search_term else "%"
-    # DISTINCT + COMPANY_NAME: the tenant name can match several companies in a schema;
-    # this disambiguates them and collapses the cross-join's duplicate rows.
-    sql = (
-        "SELECT DISTINCT comp.COMPANY_NAME, cm.CONFIG_CD, "
-        "cc.VALUE AS tenant_value, cm.DEFAULT_VALUE, cm.Description "
-        "FROM company_mstr comp "
-        "JOIN config_mstr cm ON 1=1 "
-        "LEFT JOIN company_config cc ON cc.CONFIG_MSTR_SEQ = cm.CONFIG_MSTR_SEQ "
-        "AND cc.COMPANY_MSTR_SEQ = comp.COMPANY_MSTR_SEQ "
-        f"WHERE comp.COMPANY_NAME LIKE '%{_escape(tenant_name)}%' "
-        f"AND (cm.CONFIG_CD LIKE '{_escape(like)}' OR cm.Description LIKE '{_escape(like)}') "
-        "ORDER BY comp.COMPANY_NAME, cm.CONFIG_CD "
-        "LIMIT 200"
-    )
-    return query_live_database(sql, company_id, schema=schema)
+    t, lk = _escape(tenant_name), _escape(like)
+    parts: list = []
+    hits = 0
+    for sch in schemas:
+        try:
+            conn = _connect(sch)
+        except Exception as e:
+            parts.append(f"### {sch}\n[connection failed: {e}]")
+            continue
+        try:
+            name_col = _company_name_col(conn, sch)
+            if not name_col:
+                continue  # this schema's company_mstr has no recognizable name column
+            # name_col is from a fixed allowlist; tenant/search are escaped → read-only SELECT.
+            sql = (
+                f"SELECT DISTINCT comp.{name_col} AS company, cm.CONFIG_CD, "
+                "cc.VALUE AS tenant_value, cm.DEFAULT_VALUE, cm.Description "
+                "FROM company_mstr comp JOIN config_mstr cm ON 1=1 "
+                "LEFT JOIN company_config cc ON cc.CONFIG_MSTR_SEQ = cm.CONFIG_MSTR_SEQ "
+                "AND cc.COMPANY_MSTR_SEQ = comp.COMPANY_MSTR_SEQ "
+                f"WHERE comp.{name_col} LIKE '%{t}%' "
+                f"AND (cm.CONFIG_CD LIKE '{lk}' OR cm.Description LIKE '{lk}') "
+                f"ORDER BY comp.{name_col}, cm.CONFIG_CD LIMIT 200"
+            )
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                cols = [d[0] for d in (cur.description or [])]
+                rows = cur.fetchmany(config.LIVE_DB_MAX_ROWS)
+            if rows:
+                hits += 1
+                parts.append(f"### {sch}\n{_format_rows(cols, rows)}")
+        except Exception as e:
+            parts.append(f"### {sch}\n[error: {e}]")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    _audit(company_id, f"[get_tenant_configs {tenant_name}] x{len(schemas)}", ok=True, rows=hits)
+    if not parts:
+        return f"No config found for '{tenant_name}' in any of the {len(schemas)} schemas."
+    return f"Config for '{tenant_name}' across {hits} of {len(schemas)} schemas:\n\n" + "\n\n".join(parts)
 
 
 def list_live_schemas(company_id: Optional[str] = None) -> str:

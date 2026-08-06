@@ -9,7 +9,7 @@
  * The /api/agentic/query stream uses the SAME SSE contract as /api/chat/query
  * (sources → token → done), so the existing chat renderer consumes it unchanged.
  */
-import { apiFetch, apiUrl, companyHeaders } from "@/lib/api";
+import { apiFetch, apiUrl, companyHeaders, authHeader } from "@/lib/api";
 
 export type ToolStatus = {
   owner: "ripplebot" | "pia";
@@ -59,8 +59,8 @@ export async function streamAgenticQuery(
     // The Assistant is cross-tenant: help center is a shared store and the live-DB
     // tool fans out across all schemas, so a fixed scope avoids company-selector bias.
     const headers: Record<string, string> = opts.companyId
-      ? { "Content-Type": "application/json", "X-Company-Id": opts.companyId }
-      : { "Content-Type": "application/json", ...companyHeaders() };
+      ? { "Content-Type": "application/json", "X-Company-Id": opts.companyId, ...authHeader() }
+      : { "Content-Type": "application/json", ...companyHeaders(), ...authHeader() };
     const res = await fetch(apiUrl("/api/agentic/query"), {
       method: "POST",
       headers,

@@ -13,6 +13,7 @@ import { Toaster } from "sonner";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { AppHeader } from "@/components/app-header";
+import { AuthGate } from "@/components/auth-gate";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 
@@ -123,18 +124,20 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <SidebarProvider>
-        <div className="flex min-h-screen w-full bg-background text-foreground">
-          <AppSidebar />
-          <div className="flex flex-1 flex-col min-w-0">
-            <AppHeader />
-            <main className="flex-1 min-w-0">
-              <Outlet />
-            </main>
+      <AuthGate>
+        <SidebarProvider>
+          <div className="flex min-h-screen w-full bg-background text-foreground">
+            <AppSidebar />
+            <div className="flex flex-1 flex-col min-w-0">
+              <AppHeader />
+              <main className="flex-1 min-w-0">
+                <Outlet />
+              </main>
+            </div>
           </div>
-        </div>
-        <Toaster richColors position="top-right" closeButton />
-      </SidebarProvider>
+          <Toaster richColors position="top-right" closeButton />
+        </SidebarProvider>
+      </AuthGate>
     </QueryClientProvider>
   );
 }

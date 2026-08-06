@@ -6,6 +6,13 @@ export function companyHeaders(): Record<string, string> {
   return { "X-Company-Id": getSelectedCompany() };
 }
 
+/** Bearer auth header from the stored employee-login JWT (empty when not signed in). */
+export function authHeader(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  const t = window.localStorage.getItem("ripplebot:token");
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
 /**
  * Central backend access. The base URL is configurable via VITE_API_URL so the
  * frontend isn't hard-wired to localhost:8000 (set it in a .env file for other
@@ -39,10 +46,10 @@ export async function apiFetch(
     else signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
   try {
-    // Always attach the tenant header (caller headers win on conflict).
+    // Always attach the tenant + auth headers (caller headers win on conflict).
     return await fetch(apiUrl(path), {
       ...rest,
-      headers: { ...companyHeaders(), ...(headers as Record<string, string> | undefined) },
+      headers: { ...companyHeaders(), ...authHeader(), ...(headers as Record<string, string> | undefined) },
       signal: controller.signal,
     });
   } finally {

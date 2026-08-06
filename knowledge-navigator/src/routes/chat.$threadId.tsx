@@ -38,7 +38,7 @@ import {
 } from "@/lib/chat-store";
 import { promptChips } from "@/lib/mock-data";
 import { SourceDrawer } from "@/components/source-drawer";
-import { apiUrl, companyHeaders } from "@/lib/api";
+import { apiUrl, companyHeaders, authHeader } from "@/lib/api";
 import { useCompany } from "@/lib/company";
 
 export const Route = createFileRoute("/chat/$threadId")({
@@ -161,7 +161,7 @@ function ChatThreadView() {
     try {
       const response = await fetch(apiUrl("/api/chat/query"), {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...companyHeaders() },
+        headers: { "Content-Type": "application/json", ...companyHeaders(), ...authHeader() },
         body: JSON.stringify({ query: text.trim(), filters: {} }),
       });
 
